@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Alerting rules (đề yêu cầu). Xem trạng thái tại http://localhost:9090/alerts
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+scrape_configs:
+  # Triton Inference Server — metrics gốc ở cổng 8002/metrics
+  - job_name: "triton"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["triton:8002"]
+
+  # FastAPI gateway — team serving thêm sau (Prometheus sẽ báo DOWN đến khi có)
+  - job_name: "gateway"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["gateway:8000"]
+
+  # Bản thân Prometheus
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
