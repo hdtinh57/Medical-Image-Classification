@@ -15,3 +15,21 @@ venv/
 # Tooling
 .pytest_cache/
 .ruff_cache/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Dataset & model binaries — dùng MinIO, KHÔNG commit
+data/
+model/*.pth
+model_repository/**/*.onnx
+*.onnx
+
+# Giữ lại config Triton (KHÔNG ignore): config.pbtxt, labels.txt
+
+# Local caches / logs
+.cache/
+*.log
