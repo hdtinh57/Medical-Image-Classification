@@ -1,0 +1,17 @@
+# Local datasets and downloaded artifacts
+data/
+*.zip
+
+# Kaggle credentials
+kaggle.json
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/

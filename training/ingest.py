@@ -43,7 +43,18 @@ def write_marker(directory: Path, image_count: int) -> None:
 
 
 def load_kaggle_api():
-    """Import and authenticate the Kaggle API with a helpful error message."""
+    """Load local environment variables and authenticate the Kaggle API."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError as exc:
+        raise RuntimeError(
+            "Chưa cài package 'python-dotenv'. "
+            "Chạy: pip install -r requirements.txt"
+        ) from exc
+
+    # Existing OS/CI environment variables take precedence over local .env values.
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
+
     try:
         from kaggle.api.kaggle_api_extended import KaggleApi
     except ImportError as exc:
