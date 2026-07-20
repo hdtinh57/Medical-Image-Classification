@@ -1,0 +1,127 @@
+# =====================================================================
+# Infra slice: MinIO (model store) + Triton (serving) + Prometheus + Grafana
+# Chủ sở hữu: vai 3 (Serving/Infra) + vai 4 (Observability)
+#
+# Chạy:
+#   1) docker compose up -d                     # tạo bucket + Triton (poll; repo có thể trống lúc đầu)
+#   2) (team train) đẩy .pth lên bucket 'model-registry'
+#   3) python training/export_triton.py         # kéo .pth -> ONNX -> đẩy vào bucket 'models'
+#
+# Dev credentials only — ĐỔI trước khi để repo public.
+# =====================================================================
+
+services:
+  # ------------------------------------------------------------------
+  # MinIO — object store S3-compatible, chứa Triton model repository
+  # ------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console -> http://localhost:9001 (minioadmin/minioadmin)
+    volumes:
+      - minio_data:/data
+    networks: [mlops]
+
+  # ------------------------------------------------------------------
+  # minio-init — tạo 2 bucket rồi thoát:
+  #   model-registry : .pth   (team train đẩy lên)
+  #   models         : .onnx  (Triton đọc; export_triton.py đẩy lên)
+  # Triton chỉ start khi bước này hoàn tất (service_completed_successfully).
+  # ------------------------------------------------------------------
+  minio-init:
+    image: minio/mc:latest
+    depends_on: [minio]
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do
+        echo 'waiting for minio...'; sleep 2;
+      done;
+      mc mb --ignore-existing local/model-registry;
+      mc mb --ignore-existing local/models;
+      echo '>>> buckets ready: model-registry (.pth) + models (ONNX cho Triton)';
+      "
+    networks: [mlops]
+
+  # ------------------------------------------------------------------
+  # Triton — nạp model từ MinIO qua S3, serve REST/gRPC + Prometheus metrics
+  #   REST   : http://localhost:8000   (v2 inference protocol)
+  #   gRPC   : localhost:8001
+  #   metrics: http://localhost:8002/metrics
+  # ------------------------------------------------------------------
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.08-py3   # kiểm tra tag mới nhất trên NGC nếu cần
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
+    # Cú pháp S3 endpoint tùy biến của Triton: s3://<scheme>://<host>:<port>/<bucket>/<path>
+    # Bucket 'models' có thể TRỐNG lúc khởi động (chưa export) -> exit-on-error=false
+    # để Triton không crash; poll sẽ tự nạp model khi export_triton.py đẩy lên.
+    command: >
+      tritonserver
+      --model-repository=s3://http://minio:9000/models
+      --model-control-mode=poll
+      --repository-poll-secs=30
+      --exit-on-error=false
+      --allow-metrics=true
+      --metrics-port=8002
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    networks: [mlops]
+
+  # ------------------------------------------------------------------
+  # Prometheus — scrape metrics Triton (+ gateway sau này)
+  # ------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    depends_on: [triton]
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"   # http://localhost:9090
+    networks: [mlops]
+
+  # ------------------------------------------------------------------
+  # Grafana — dashboard + alert, tự provision datasource Prometheus
+  # ------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    depends_on: [prometheus]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"   # http://localhost:3000 (admin/admin)
+    networks: [mlops]
+
+  # ------------------------------------------------------------------
+  # (Team khác thêm sau — chừa sẵn chỗ)
+  #   gateway: FastAPI nhận ảnh -> gọi Triton -> Grad-CAM      (vai 3)
+  #   mlflow : tracking server + registry                       (vai 2)
+  # ------------------------------------------------------------------
+
+volumes:
+  minio_data:
+  grafana_data:
+
+networks:
+  mlops:
+    driver: bridge
