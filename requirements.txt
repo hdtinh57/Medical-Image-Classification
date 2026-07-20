@@ -1,2 +1,4 @@
+kaggle>=1.6,<3.0
+python-dotenv>=1.0,<2.0
 pre-commit==4.0.1
 ruff==0.8.6
