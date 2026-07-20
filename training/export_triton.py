@@ -11,18 +11,19 @@ Cài đặt:
     pip install torch timm onnx onnxruntime boto3
 
 Chạy (khi MinIO đang chạy):
-    python training/export_triton.py                    # lấy version .pth mới nhất trong registry
-    python training/export_triton.py --version 2         # đúng version 2
-    python training/export_triton.py --local-weights model/best_weights.pth   # test, không cần registry
+    python training/export_triton.py
+    python training/export_triton.py --version 2
+    python training/export_triton.py --local-weights model/best_weights.pth
 """
+
 import argparse
 import os
 import tempfile
 from pathlib import Path
 
-import torch
-import timm
 import boto3
+import timm
+import torch
 from botocore.client import Config
 from botocore.exceptions import ClientError
 
@@ -31,7 +32,7 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 REGISTRY_BUCKET = os.getenv("REGISTRY_BUCKET", "model-registry")  # .pth  (team train đẩy lên)
-TRITON_BUCKET = os.getenv("TRITON_BUCKET", "models")              # .onnx (Triton đọc)
+TRITON_BUCKET = os.getenv("TRITON_BUCKET", "models")  # .onnx (Triton đọc)
 
 # --- Model ---
 MODEL_NAME = "skin_classifier"
@@ -71,7 +72,7 @@ def latest_version(s3, bucket: str, model_name: str) -> int:
     resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, Delimiter="/")
     versions = []
     for cp in resp.get("CommonPrefixes", []):
-        part = cp["Prefix"][len(prefix):].strip("/")
+        part = cp["Prefix"][len(prefix) :].strip("/")
         if part.isdigit():
             versions.append(int(part))
     if not versions:
@@ -122,8 +123,12 @@ def verify_onnx(onnx_path: Path, dummy: torch.Tensor) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--version", type=int, default=None, help="version .pth trong registry; mặc định mới nhất")
-    ap.add_argument("--local-weights", default=None, help="dùng .pth local, bỏ qua bước pull (để test)")
+    ap.add_argument(
+        "--version", type=int, default=None, help="version .pth trong registry; mặc định mới nhất"
+    )
+    ap.add_argument(
+        "--local-weights", default=None, help="dùng .pth local, bỏ qua bước pull (để test)"
+    )
     args = ap.parse_args()
 
     s3 = s3_client()
@@ -151,11 +156,16 @@ def main() -> None:
 
     # 3) ĐẨY Triton repo (config + labels + onnx) lên bucket 'models'
     print(f"[export] đẩy Triton repo -> s3://{TRITON_BUCKET}/{MODEL_NAME}/")
-    for local, key in [
+    uploads = [
         (CONFIG_FILE, f"{MODEL_NAME}/config.pbtxt"),
         (LABELS_FILE, f"{MODEL_NAME}/labels.txt"),
         (out_onnx, f"{MODEL_NAME}/{version}/model.onnx"),
-    ]:
+    ]
+    # torch.onnx (dynamo exporter) có thể tách weights lớn ra file .onnx.data cạnh model.onnx
+    external_data = out_onnx.parent / f"{out_onnx.name}.data"
+    if external_data.exists():
+        uploads.append((external_data, f"{MODEL_NAME}/{version}/{external_data.name}"))
+    for local, key in uploads:
         s3.upload_file(str(local), TRITON_BUCKET, key)
         print(f"  ↑ s3://{TRITON_BUCKET}/{key}")
 
