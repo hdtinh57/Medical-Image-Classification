@@ -1,0 +1,42 @@
+groups:
+  - name: triton_alerts
+    rules:
+      # Triton chết / không scrape được
+      - alert: TritonDown
+        expr: up{job="triton"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Triton Inference Server DOWN"
+          description: "Prometheus không scrape được Triton (job=triton) hơn 1 phút."
+
+      # Có request suy luận bị lỗi
+      - alert: TritonInferenceErrors
+        expr: rate(nv_inference_request_failure[5m]) > 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Triton có inference thất bại"
+          description: "Model {{ $labels.model }} đang có request lỗi trong 5 phút gần đây."
+
+      # Độ trễ suy luận trung bình cao (ms) — ngưỡng demo 500ms, chỉnh theo thực tế
+      - alert: TritonHighLatency
+        expr: >
+          sum(rate(nv_inference_request_duration_us[5m]))
+          / sum(rate(nv_inference_count[5m])) / 1000 > 500
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Độ trễ suy luận Triton cao"
+          description: "Latency trung bình > 500ms trong 5 phút."
+
+  - name: gateway_alerts
+    rules:
+      # Gateway (FastAPI) không scrape được — kích hoạt khi team serving deploy xong
+      - alert: GatewayDown
+        expr: up{job="gateway"} == 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Gateway FastAPI DOWN"
+          description: "Không scrape được gateway (job=gateway) hơn 2 phút."
