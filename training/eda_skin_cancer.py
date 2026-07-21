@@ -26,13 +26,11 @@ Nếu bạn tải bằng Kaggle API:
 """
 
 import os
-import random
 from pathlib import Path
-from collections import defaultdict
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import seaborn as sns
 from PIL import Image
 
@@ -73,9 +71,7 @@ def build_index(root_dir: Path, split_name: str) -> pd.DataFrame:
             continue
         for f in class_dir.iterdir():
             if f.suffix.lower() in IMAGE_EXTS:
-                records.append(
-                    {"filepath": str(f), "class": class_dir.name, "split": split_name}
-                )
+                records.append({"filepath": str(f), "class": class_dir.name, "split": split_name})
     return pd.DataFrame(records)
 
 
@@ -157,13 +153,15 @@ def show_sample_images(df: pd.DataFrame, n_per_class: int = 3):
     fig, axes = plt.subplots(len(classes), n_per_class, figsize=(n_per_class * 3, len(classes) * 3))
 
     for i, cls in enumerate(classes):
-        subset = df[df["class"] == cls].sample(min(n_per_class, len(df[df["class"] == cls])), random_state=42)
+        subset = df[df["class"] == cls].sample(
+            min(n_per_class, len(df[df["class"] == cls])), random_state=42
+        )
         for j, (_, row) in enumerate(subset.iterrows()):
             ax = axes[i, j] if n_per_class > 1 else axes[i]
             try:
                 img = Image.open(row["filepath"])
                 ax.imshow(img)
-            except Exception as e:
+            except Exception:
                 ax.text(0.5, 0.5, "Lỗi ảnh", ha="center", va="center")
             ax.axis("off")
             if j == 0:
@@ -223,7 +221,9 @@ def analyze_image_sizes(df: pd.DataFrame, sample_size: int = 500):
     sns.histplot(sample_df["height"].dropna(), bins=30, ax=axes[1], color="salmon")
     axes[1].set_title("Phân bố chiều cao (height)")
 
-    sns.scatterplot(data=sample_df, x="width", y="height", hue="class", ax=axes[2], legend=False, alpha=0.6)
+    sns.scatterplot(
+        data=sample_df, x="width", y="height", hue="class", ax=axes[2], legend=False, alpha=0.6
+    )
     axes[2].set_title("Tương quan width vs height")
 
     plt.tight_layout()
@@ -269,7 +269,10 @@ def analyze_color_brightness(df: pd.DataFrame, sample_per_class: int = 30):
     axes[0].tick_params(axis="x", rotation=75)
 
     color_melt = color_df.melt(
-        id_vars=["class"], value_vars=["mean_R", "mean_G", "mean_B"], var_name="channel", value_name="value"
+        id_vars=["class"],
+        value_vars=["mean_R", "mean_G", "mean_B"],
+        var_name="channel",
+        value_name="value",
     )
     sns.boxplot(data=color_melt, x="class", y="value", hue="channel", ax=axes[1])
     axes[1].set_title("Giá trị kênh màu RGB trung bình theo lớp")
@@ -323,6 +326,9 @@ print("=" * 60)
 print(f"- Tổng số ảnh: {len(df)}")
 print(f"- Số lớp: {df['class'].nunique()}")
 print(f"- Tỉ lệ mất cân bằng lớp: {imbalance_ratio:.2f}x")
-print(f"- Kích thước ảnh trung bình (mẫu): {size_df['width'].mean():.0f} x {size_df['height'].mean():.0f} px")
+print(
+    f"- Kích thước ảnh trung bình (mẫu): "
+    f"{size_df['width'].mean():.0f} x {size_df['height'].mean():.0f} px"
+)
 print("- Các biểu đồ đã lưu: class_distribution.png, sample_images.png,")
 print("  image_size_distribution.png, color_brightness_by_class.png, file_size_distribution.png")

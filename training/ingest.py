@@ -48,8 +48,7 @@ def load_kaggle_api():
         from dotenv import load_dotenv
     except ImportError as exc:
         raise RuntimeError(
-            "Chưa cài package 'python-dotenv'. "
-            "Chạy: pip install -r requirements.txt"
+            "Chưa cài package 'python-dotenv'. " "Chạy: pip install -r requirements.txt"
         ) from exc
 
     # Existing OS/CI environment variables take precedence over local .env values.
@@ -80,8 +79,7 @@ def download_dataset(output_dir: Path, force: bool = False) -> None:
     existing_images = count_images(output_dir)
     if existing_images > 0 and not force:
         print(
-            f"Dataset đã tồn tại tại: {output_dir} "
-            f"({existing_images:,} ảnh). Bỏ qua tải lại."
+            f"Dataset đã tồn tại tại: {output_dir} " f"({existing_images:,} ảnh). Bỏ qua tải lại."
         )
         return
 
@@ -127,8 +125,7 @@ def download_dataset(output_dir: Path, force: bool = False) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Tự động tải và giải nén dataset Skin Cancer ISIC từ Kaggle "
-            "nếu data chưa tồn tại."
+            "Tự động tải và giải nén dataset Skin Cancer ISIC từ Kaggle " "nếu data chưa tồn tại."
         )
     )
     parser.add_argument(

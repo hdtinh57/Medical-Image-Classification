@@ -33,3 +33,9 @@ model_repository/**/*.onnx
 # Local caches / logs
 .cache/
 *.log
+*.stackdump
+
+# Coverage (sinh bởi pytest-cov / CI)
+.coverage
+coverage.xml
+htmlcov/

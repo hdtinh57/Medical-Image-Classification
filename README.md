@@ -1,5 +1,8 @@
 # Medical Image Classification
 
+[![CI](https://github.com/hdtinh57/Medical-Image-Classification/actions/workflows/ci.yml/badge.svg)](https://github.com/hdtinh57/Medical-Image-Classification/actions/workflows/ci.yml)
+[![Release model](https://github.com/hdtinh57/Medical-Image-Classification/actions/workflows/release-model.yml/badge.svg)](https://github.com/hdtinh57/Medical-Image-Classification/actions/workflows/release-model.yml)
+
 ## Tải dataset tự động từ Kaggle
 
 Dataset: [Skin Cancer ISIC — 9 Classes](https://www.kaggle.com/datasets/nodoubttome/skin-cancer9-classesisic/data)
@@ -58,4 +61,34 @@ python training/ingest.py --output D:\datasets\skin-cancer
 
 # Tải lại và thay thế data hiện tại sau khi bản mới tải thành công
 python training/ingest.py --force
+```
+
+## CI/CD (GitHub Actions)
+
+| Workflow | Chạy khi | Làm gì |
+|---|---|---|
+| [`ci.yml`](.github/workflows/ci.yml) | mọi push + PR vào `main`/`dev` | `ruff` lint + format · `pytest` (unit, data-quality, model-validation) + coverage · validate `docker-compose.yml`, Prometheus rules, Grafana dashboard |
+| [`release-model.yml`](.github/workflows/release-model.yml) | PR vào `main` · tag `model-v*` · chạy tay | Export `.pth` → ONNX → đẩy lên MinIO → verify round-trip bằng `onnxruntime` → upload `model.onnx` làm artifact. Job `triton-smoke` (tuỳ chọn) chạy Triton thật và gọi infer. |
+
+MinIO của nhóm chạy ở `localhost` nên runner GitHub không kết nối được. CI vì vậy dựng **MinIO ephemeral** trong job để kiểm chứng trọn pipeline export → upload → load; file ONNX được đẩy lên GitHub artifact để tải về dùng thật.
+
+CI **không train model** (theo PLAN §1.3) — job `release-model` sinh checkpoint random đúng kiến trúc chỉ để kiểm tra đường ống.
+
+> **Số lớp: model 6 ≠ dataset 9.** Model đang serve là [`conan17970/convnextv2-skin-cancer-isic2019`](https://huggingface.co/conan17970/convnextv2-skin-cancer-isic2019) — ConvNeXtV2-tiny fine-tune trên ISIC 2019, **6 lớp** `ACK · BCC · MEL · NEV · SCC · SEK`. Dataset `ingest.py` tải về là bộ Kaggle **9 lớp**, dùng cho EDA và train lại sau này. `test_model_validation.py` canh cho `NUM_CLASSES`, `CLASSES`, `labels.txt` và `config.pbtxt` khớp nhau **theo model đang serve**, không theo dataset.
+
+### Chạy trước khi push (giống hệt CI)
+
+```powershell
+python -m pip install -r requirements-dev.txt
+
+ruff check .
+ruff format --check .
+pytest
+```
+
+Hoặc để `pre-commit` tự lo phần lint:
+
+```powershell
+pre-commit install
+pre-commit run --all-files
 ```
