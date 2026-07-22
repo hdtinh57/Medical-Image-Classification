@@ -1,107 +1,73 @@
-"""Data-quality tests cho pipeline ingest (phần D của rubric).
-
-Hai nhóm:
-1. Test logic ingest thuần (count_images / write_marker) — chạy được mọi lúc,
-   dùng tmp_path, không cần dataset thật.
-2. Test chất lượng dataset thật — chỉ chạy khi data/ đã tải về, tự skip trong CI.
-"""
+"""Tests for grouped dataset manifests and leakage protection."""
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
+import pandas as pd
 
-import pytest
-
-from training.ingest import (
-    DEFAULT_OUTPUT_DIR,
-    IMAGE_EXTENSIONS,
-    MARKER_FILE,
-    count_images,
-    write_marker,
-)
+from training.dataset import SplitConfig, build_training_manifest, summarize_manifest
+from training.model import CLASS_NAMES
 
 
-def _touch(path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"")
-    return path
+def _synthetic_index() -> pd.DataFrame:
+    records = []
+    for class_index, class_name in enumerate(CLASS_NAMES):
+        for image_index in range(5):
+            records.append(
+                {
+                    "relative_path": f"Train/{class_name}/image-{image_index}.jpg",
+                    "split": "Train",
+                    "class_name": class_name,
+                    "sha256": f"train-{class_index}-{image_index}",
+                }
+            )
+        records.append(
+            {
+                "relative_path": f"Test/{class_name}/image.jpg",
+                "split": "Test",
+                "class_name": class_name,
+                "sha256": f"test-{class_index}",
+            }
+        )
+
+    records.append(
+        {
+            "relative_path": f"Train/{CLASS_NAMES[0]}/duplicate.jpg",
+            "split": "Train",
+            "class_name": CLASS_NAMES[0],
+            "sha256": "train-0-0",
+        }
+    )
+    return pd.DataFrame.from_records(records)
 
 
-# --------------------------------------------------------------------------
-# 1. Logic ingest — luôn chạy
-# --------------------------------------------------------------------------
+def test_grouped_manifest_preserves_test_and_prevents_train_val_overlap() -> None:
+    split_config = SplitConfig(n_splits=5, fold=0, seed=42)
+
+    manifest = build_training_manifest(_synthetic_index(), split_config)
+    summary = summarize_manifest(manifest, split_config)
+
+    assert summary["class_count"] == 9
+    assert summary["split_counts"]["test"] == 9
+    assert summary["train_val_group_overlap"] == 0
+    assert set(manifest["training_split"]) == {"train", "val", "test"}
 
 
-def test_count_images_tra_ve_0_khi_thu_muc_khong_ton_tai(tmp_path):
-    assert count_images(tmp_path / "khong-co-that") == 0
+def test_identical_content_stays_in_one_training_split() -> None:
+    manifest = build_training_manifest(
+        _synthetic_index(),
+        SplitConfig(n_splits=5, fold=0, seed=7),
+    )
+
+    duplicate_rows = manifest[manifest["group_id"] == "train-0-0"]
+
+    assert len(duplicate_rows) == 2
+    assert duplicate_rows["training_split"].nunique() == 1
 
 
-def test_count_images_dem_de_quy_va_bo_qua_file_khong_phai_anh(tmp_path):
-    _touch(tmp_path / "a.jpg")
-    _touch(tmp_path / "nested" / "b.PNG")  # đuôi viết hoa vẫn phải tính
-    _touch(tmp_path / "nested" / "sau" / "c.jpeg")
-    _touch(tmp_path / "readme.txt")  # không phải ảnh
-    _touch(tmp_path / "metadata.csv")  # không phải ảnh
+def test_manifest_assignment_is_deterministic() -> None:
+    split_config = SplitConfig(n_splits=5, fold=2, seed=21)
 
-    assert count_images(tmp_path) == 3
+    first = build_training_manifest(_synthetic_index(), split_config)
+    second = build_training_manifest(_synthetic_index(), split_config)
 
-
-@pytest.mark.parametrize("ext", sorted(IMAGE_EXTENSIONS))
-def test_count_images_nhan_moi_duoi_anh_khai_bao(tmp_path, ext):
-    _touch(tmp_path / f"anh{ext}")
-    assert count_images(tmp_path) == 1
-
-
-def test_write_marker_ghi_json_doc_lai_duoc(tmp_path):
-    write_marker(tmp_path, image_count=1234)
-
-    marker = json.loads((tmp_path / MARKER_FILE).read_text(encoding="utf-8"))
-    assert marker["image_count"] == 1234
-    assert marker["dataset"]
-    assert marker["downloaded_at"]
-
-
-# --------------------------------------------------------------------------
-# 2. Chất lượng dataset thật — skip khi chưa có data (CI luôn skip)
-# --------------------------------------------------------------------------
-
-requires_dataset = pytest.mark.skipif(
-    count_images(DEFAULT_OUTPUT_DIR) == 0,
-    reason="Chưa tải dataset về data/ — chạy `python training/ingest.py` trước",
-)
-
-
-def class_distribution(dataset_dir: Path) -> dict[str, int]:
-    """Số ảnh mỗi lớp; mỗi thư mục con cấp 1 = một lớp."""
-    return {sub.name: count_images(sub) for sub in sorted(dataset_dir.iterdir()) if sub.is_dir()}
-
-
-# TODO(bạn viết): định nghĩa ngưỡng "dataset đủ tốt để train".
-# Đây là quyết định domain, không phải code máy móc — xem phần giải thích ở chat.
-#
-# def check_dataset_quality(distribution: dict[str, int]) -> list[str]:
-#     """Trả về danh sách vi phạm; list rỗng = dataset đạt.
-#
-#     Gợi ý cân nhắc:
-#       - số ảnh tối thiểu mỗi lớp (train nổi không?)
-#       - tỉ lệ mất cân bằng tối đa (lớp lớn nhất / lớp nhỏ nhất)
-#       - lớp ác tính MEL/BCC/SCC có cần ngưỡng chặt hơn lớp lành tính không?
-#     """
-#     violations: list[str] = []
-#     ...
-#     return violations
-
-
-@requires_dataset
-def test_dataset_co_du_lop_va_khong_co_lop_rong():
-    distribution = class_distribution(DEFAULT_OUTPUT_DIR)
-
-    assert distribution, f"Không tìm thấy thư mục lớp nào trong {DEFAULT_OUTPUT_DIR}"
-    empty = [name for name, count in distribution.items() if count == 0]
-    assert not empty, f"Lớp rỗng: {empty}"
-
-
-# CỐ Ý không assert labels.txt khớp tên thư mục dataset: model đang serve là bản
-# 6 lớp (ACK/BCC/MEL/NEV/SCC/SEK) fine-tune trên ISIC 2019, còn dataset tải về là
-# bộ 9 lớp. Hai thứ khác nhau có chủ đích — xem README §CI/CD.
+    assert first.equals(second)

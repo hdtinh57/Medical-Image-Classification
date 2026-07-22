@@ -2,7 +2,7 @@
 
 **Domain:** Healthcare & Life Sciences · **Topic 6 — Medical Image Classification**
 **Bài toán:** Phân loại ảnh y tế hỗ trợ bác sĩ phát hiện bất thường.
-**Dataset đề xuất:** ISIC Skin Cancer (nhị phân *benign / malignant*, dùng subset cân bằng) — chọn vì cho câu chuyện **fairness theo tông da / giới / tuổi** mạnh nhất ở phần Responsible AI. *(Có thể đổi sang APTOS Diabetic Retinopathy nếu muốn nhẹ hơn.)*
+**Dataset:** Kaggle Skin Cancer ISIC — 2.357 ảnh, bài toán **phân loại 9 lớp**. Raw Kaggle Train/Test được giữ nguyên để làm benchmark; Validation được tách từ Train theo SHA group để tránh leakage nội bộ.
 
 **Stack đã chốt:** MinIO · Triton Inference Server · MLflow · FastAPI (gateway) · Prometheus · Grafana · GitHub Actions · Docker Compose
 
@@ -95,7 +95,7 @@ MLOps/
 │   ├── preprocess.py              # resize / normalize / augment
 │   ├── dataset.py
 │   ├── train.py                   # transfer learning + log MLflow
-│   ├── evaluate.py                # AUC, confusion matrix, per-subgroup
+│   ├── evaluate.py                # multiclass metrics, confusion matrix, per-subgroup
 │   └── export_triton.py           # PyTorch -> ONNX + sinh config.pbtxt
 │
 ├── model_repository/              # layout chuẩn Triton (đẩy lên MinIO)
@@ -125,7 +125,7 @@ MLOps/
 │   ├── test_data_quality.py
 │   ├── test_preprocess.py
 │   ├── test_api.py                # integration test endpoint
-│   └── test_model_validation.py   # AUC >= ngưỡng
+│   └── test_model_validation.py   # 9-class contract + metric schema
 │
 └── .github/workflows/
     ├── ci.yml                     # lint + test + data-quality + model-validation
@@ -144,7 +144,7 @@ MLOps/
 - [ ] Dựng `docker-compose` khung: MinIO + MLflow chạy được.
 
 ### Tuần 2 — Model & serving
-- [ ] `train.py`: transfer learning + **log MLflow** (params, AUC, confusion matrix).
+- [ ] `train.py`: transfer learning + **log MLflow** (params, macro F1, confusion matrix).
 - [ ] `evaluate.py` + chọn best model → đăng ký MLflow registry.
 - [ ] `export_triton.py`: ONNX + `config.pbtxt`; đẩy `model_repository` lên MinIO.
 - [ ] **Triton** load được model từ MinIO; gọi thử inference.
@@ -202,7 +202,7 @@ MLOps/
 
 - **Business:** giảm thời gian sàng lọc của bác sĩ; tăng tỉ lệ phát hiện sớm ca ác tính (ưu tiên **recall/sensitivity** vì bỏ sót nguy hiểm hơn báo nhầm).
 - **System:** p95 latency của gateway < X ms; uptime; throughput req/s (đo qua Prometheus).
-- **Model:** AUC ≥ ngưỡng, recall lớp *malignant* ≥ ngưỡng, **chênh lệch hiệu năng giữa các subgroup < ngưỡng** (fairness).
+- **Model:** ưu tiên Validation **macro F1**, balanced accuracy và per-class recall/F1; Kaggle Test chỉ đánh giá sau khi chọn checkpoint. Fairness theo subgroup được bổ sung khi có metadata phù hợp.
 
 ---
 

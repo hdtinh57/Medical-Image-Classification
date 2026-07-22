@@ -8,7 +8,7 @@ Bước train + đẩy `.pth` lên MinIO là của **team train** (không thuộ
 
 | Bucket | Chứa | Ai ghi |
 |---|---|---|
-| `model-registry` | Checkpoint `.pth` theo version: `skin_classifier/<N>/best_weights.pth` | **Team train** đẩy lên |
+| `model-registry` | Checkpoint `.pth` theo version: `skin_classifier/<N>/best_checkpoint.pth` | **Team train** đẩy lên |
 | `models` | Triton repo (ONNX): `skin_classifier/config.pbtxt`, `labels.txt`, `<N>/model.onnx` | **export_triton.py** (slice này) |
 
 Version ONNX trong Triton = version `.pth` trong registry (1:1).
@@ -16,7 +16,7 @@ Version ONNX trong Triton = version `.pth` trong registry (1:1).
 ## Luồng
 
 ```
-[team train] ──push .pth──►  MinIO: model-registry/skin_classifier/<N>/best_weights.pth
+[team train] ──push .pth──►  MinIO: model-registry/skin_classifier/<N>/best_checkpoint.pth
                                           │
                                           │  export_triton.py  (KÉO xuống)
                                           ▼
@@ -45,13 +45,14 @@ Lúc này bucket `models` còn trống → Triton chạy `--exit-on-error=false`
 
 **Trường hợp thật:** team train đã đẩy `.pth` lên `model-registry`. Bạn chỉ chạy:
 ```bash
-python training/export_triton.py            # lấy version mới nhất
-# hoặc chỉ định: python training/export_triton.py --version 2
+python -m training.export_triton --upload            # lấy version mới nhất
+# hoặc chỉ định: python -m training.export_triton --version 2 --upload
 ```
 
 **Test độc lập** (team train chưa đẩy) — dùng file `.pth` local, bỏ qua bước pull:
 ```bash
-python training/export_triton.py --local-weights model/best_weights.pth
+python -m training.export_triton --local-checkpoint artifacts/training/runs/<run>/best_checkpoint.pth
+# thêm --upload chỉ khi muốn publish lên MinIO
 ```
 
 Script sẽ: kéo `.pth` → convert `model.onnx` → đẩy `config.pbtxt` + `labels.txt` + `model.onnx` lên `s3://models/skin_classifier/`. Triton tự nạp trong ~30s.
@@ -83,12 +84,12 @@ c = http.InferenceServerClient(url="localhost:8000")
 x = np.random.rand(1, 3, 224, 224).astype(np.float32)
 inp = http.InferInput("input", x.shape, "FP32"); inp.set_data_from_numpy(x)
 out = c.infer("skin_classifier", [inp], outputs=[http.InferRequestedOutput("logits")])
-print(out.as_numpy("logits").shape)   # -> (1, 6)
+print(out.as_numpy("logits").shape)   # -> (1, 9)
 ```
 
 ## 5. Cập nhật model mới (retrain)
 1. Team train đẩy version mới (vd. `2`) lên `model-registry`.
-2. Bạn chạy `python training/export_triton.py --version 2` (hoặc để mặc định lấy mới nhất).
+2. Bạn chạy `python -m training.export_triton --version 2 --upload` (hoặc bỏ version để lấy mới nhất).
 3. Triton poll thấy `skin_classifier/2/` → nạp và phục vụ version mới. Không cần restart.
 
 ## 6. Dừng / dọn
@@ -108,12 +109,12 @@ Credentials lấy từ env `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (= user/p
 
 | Triệu chứng | Xử lý |
 |---|---|
-| `export_triton` báo "chưa có version trong registry" | Team train chưa đẩy `.pth`. Test tạm bằng `--local-weights`. |
+| `export_triton` báo "chưa có version trong registry" | Team train chưa đẩy `.pth`. Test local bằng `--local-checkpoint`. |
 | Triton `/v2/models/skin_classifier/ready` = 404 | Chưa export, hoặc chờ poll (30s). Xem `docker compose logs -f triton`. |
 | Triton không kết nối MinIO | Sai `AWS_*` env / endpoint; kiểm tra bucket `models` trong MinIO console. |
 | `pull access denied` khi kéo Triton | Image NGC nặng/mạng chậm; thử lại hoặc đổi tag mới hơn. |
 | Prometheus `gateway` DOWN | Bình thường — gateway do team serving làm sau. `triton` phải UP. |
-| ONNX export lỗi ở opset 17 | ConvNeXtV2 có lớp GRN; thử `OPSET=16` hoặc `18` trong `export_triton.py`. |
+| ONNX export lỗi | Giữ opset 18 và kiểm tra phiên bản `torch`, `onnx`, `onnxscript`, `onnxruntime` theo `requirements.txt`. |
 
 ## 9. Phối hợp / việc liên quan
 - **Team train:** viết bước đẩy `.pth` (versioned) lên `model-registry`.
