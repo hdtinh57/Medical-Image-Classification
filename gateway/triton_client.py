@@ -105,9 +105,7 @@ class TritonInferenceClient:
     def is_ready(self) -> bool:
         """Return True only when the server is live and the model is loaded."""
         try:
-            return self._client.is_server_ready() and self._client.is_model_ready(
-                self._model_name
-            )
+            return self._client.is_server_ready() and self._client.is_model_ready(self._model_name)
         except InferenceServerException:
             return False
 
@@ -133,7 +131,6 @@ class TritonInferenceClient:
             predicted_class=CLASS_NAMES[best],
             confidence=float(probabilities[best]),
             probabilities={
-                name: float(probability)
-                for name, probability in zip(CLASS_NAMES, probabilities)
+                name: float(probability) for name, probability in zip(CLASS_NAMES, probabilities)
             },
         )

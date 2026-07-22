@@ -96,8 +96,7 @@ async def predict(file: UploadFile = File(...)) -> dict[str, object]:
         "predicted_class": prediction.predicted_class,
         "confidence": round(prediction.confidence, 4),
         "probabilities": {
-            name: round(probability, 4)
-            for name, probability in prediction.probabilities.items()
+            name: round(probability, 4) for name, probability in prediction.probabilities.items()
         },
     }
 
