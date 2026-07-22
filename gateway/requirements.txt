@@ -1,0 +1,9 @@
+# FastAPI serving gateway — cố tình GIỮ NHẸ (không torch/timm).
+# Predict đi qua Triton; preprocess bằng Pillow + NumPy thuần.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.34,<1.0
+python-multipart>=0.0.18,<1.0
+tritonclient[http]>=2.41,<3.0
+Pillow>=12.3.0,<13.0
+numpy>=2.4.1,<2.5
+prometheus-client>=0.21,<1.0
