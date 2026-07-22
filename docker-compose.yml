@@ -65,6 +65,8 @@ services:
     # Cú pháp S3 endpoint tùy biến của Triton: s3://<scheme>://<host>:<port>/<bucket>/<path>
     # Bucket 'models' có thể TRỐNG lúc khởi động (chưa export) -> exit-on-error=false
     # để Triton không crash; poll sẽ tự nạp model khi export_triton.py đẩy lên.
+    # --log-verbose=1: log chi tiết TỪNG request inference (Promtail -> Loki -> Grafana).
+    #   Rất nhiều dòng; đặt =0 nếu chỉ cần log load model + lỗi.
     command: >
       tritonserver
       --model-repository=s3://http://minio:9000/models
@@ -73,6 +75,7 @@ services:
       --exit-on-error=false
       --allow-metrics=true
       --metrics-port=8002
+      --log-verbose=1
     ports:
       - "8000:8000"
       - "8001:8001"
@@ -95,11 +98,38 @@ services:
     networks: [mlops]
 
   # ------------------------------------------------------------------
-  # Grafana — dashboard + alert, tự provision datasource Prometheus
+  # Loki — kho log (như Prometheus nhưng cho log). Nhận log từ Promtail.
+  #   API/HTTP : http://localhost:3100
+  # ------------------------------------------------------------------
+  loki:
+    image: grafana/loki:3.2.0
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./monitoring/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    networks: [mlops]
+
+  # ------------------------------------------------------------------
+  # Promtail — đọc log MỌI container Docker qua socket rồi đẩy vào Loki.
+  # Cần mount docker.sock (read-only) để dùng Docker service discovery.
+  # ------------------------------------------------------------------
+  promtail:
+    image: grafana/promtail:3.2.0
+    command: -config.file=/etc/promtail/promtail-config.yml
+    depends_on: [loki]
+    volumes:
+      - ./monitoring/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [mlops]
+
+  # ------------------------------------------------------------------
+  # Grafana — dashboard + alert, tự provision datasource Prometheus + Loki
   # ------------------------------------------------------------------
   grafana:
     image: grafana/grafana:latest
-    depends_on: [prometheus]
+    depends_on: [prometheus, loki]
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
@@ -139,6 +169,7 @@ services:
 volumes:
   minio_data:
   grafana_data:
+  loki_data:
 
 networks:
   mlops:
