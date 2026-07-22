@@ -44,7 +44,10 @@ OUTPUT_NAME = "logits"
 _RESIZE_SHORTER = round(IMAGE_SIZE / 0.875)  # = 256
 
 TRITON_URL = os.getenv("TRITON_URL", "localhost:8000")
-_INFER_TIMEOUT_S = float(os.getenv("TRITON_TIMEOUT", "10"))
+# infer()'s timeout la server-side timeout tinh bang microsecond, phai la
+# unsigned int -- truyen float giay thang vao lam Triton parse JSON loi
+# "attempt to access JSON non-unsigned-integer as unsigned-integer".
+_INFER_TIMEOUT_US = int(float(os.getenv("TRITON_TIMEOUT", "10")) * 1_000_000)
 
 
 @dataclass(frozen=True)
@@ -121,7 +124,7 @@ class TritonInferenceClient:
             self._model_name,
             inputs=[infer_input],
             outputs=[requested_output],
-            timeout=_INFER_TIMEOUT_S,
+            timeout=_INFER_TIMEOUT_US,
         )
         logits = response.as_numpy(OUTPUT_NAME)[0]  # shape [9]
         probabilities = _softmax(logits)
