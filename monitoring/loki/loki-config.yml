@@ -15,7 +15,7 @@ common:
       rules_directory: /loki/rules
   replication_factor: 1
   ring:
-    kv_store:
+    kvstore:
       store: inmemory
 
 schema_config:
