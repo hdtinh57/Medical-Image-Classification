@@ -1,6 +1,5 @@
 # Dev/CI only — KHÔNG cài vào runtime image.
-# Giữ nhẹ: job test trong CI không được kéo torch/timm về.
+# pytest do requirements.txt pin (suite cover cả training/); ở đây chỉ thêm plugin.
 -r requirements.txt
 
-pytest==8.3.4
-pytest-cov==6.0.0
+pytest-cov>=6.0,<8.0

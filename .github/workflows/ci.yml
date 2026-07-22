@@ -1,12 +1,14 @@
-# CI nhẹ — chạy mọi push/PR, mục tiêu < 2 phút.
-# KHÔNG cài torch, KHÔNG kéo image Triton. Việc nặng nằm ở release-model.yml.
+# CI chạy mọi push/PR. KHÔNG train, KHÔNG kéo image Triton — việc nặng nằm ở
+# release-model.yml. Job test cần torch (CPU wheel) vì suite đã cover training/.
 name: CI
 
+# Luồng: feat/** -> dev -> prod. main là default branch (docs/mốc ổn định).
+# CI chạy trên PR vào cả 3 branch dài hạn vì mỗi lần merge đều là một cổng.
 on:
   push:
-    branches: [main, dev, "feat/**"]
+    branches: [main, dev, prod, "feat/**"]
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, prod]
 
 # Push liên tiếp -> huỷ run cũ, không xếp hàng tốn CI minutes.
 concurrency:
@@ -53,7 +55,12 @@ jobs:
             requirements.txt
             requirements-dev.txt
 
-      - run: pip install -r requirements-dev.txt
+      # requirements.txt kéo torch/torchvision. Trên PyPI bản Linux mặc định là
+      # wheel CUDA (~2.5GB) -> cài CPU wheel TRƯỚC, pip thấy đã thoả version thì bỏ qua.
+      - name: Cài deps (torch CPU wheel)
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements-dev.txt
 
       - name: pytest
         run: pytest --cov=training --cov-report=term-missing --cov-report=xml

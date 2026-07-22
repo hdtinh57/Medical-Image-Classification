@@ -65,46 +65,20 @@ python training/ingest.py --force
 
 ## CI/CD (GitHub Actions)
 
+Luồng branch: `feat/**` → `dev` → `prod`. `main` là default branch, giữ mốc ổn định và docs.
+
 | Workflow | Chạy khi | Làm gì |
 |---|---|---|
-| [`ci.yml`](.github/workflows/ci.yml) | mọi push + PR vào `main`/`dev` | `ruff` lint + format · `pytest` (unit, data-quality, model-validation) + coverage · validate `docker-compose.yml`, Prometheus rules, Grafana dashboard |
-| [`release-model.yml`](.github/workflows/release-model.yml) | PR vào `main` · tag `model-v*` · chạy tay | Export `.pth` → ONNX → đẩy lên MinIO → verify round-trip bằng `onnxruntime` → upload `model.onnx` làm artifact. Job `triton-smoke` (tuỳ chọn) chạy Triton thật và gọi infer. |
+| [`ci.yml`](.github/workflows/ci.yml) | push lên `main`/`dev`/`prod`/`feat/**` · PR vào `main`/`dev`/`prod` | `ruff` lint + format · `pytest` (unit, data-quality, model-validation) + coverage · validate `docker-compose.yml`, Prometheus rules, Grafana dashboard |
+| [`release-model.yml`](.github/workflows/release-model.yml) | PR vào `prod` · tag `model-v*` · chạy tay | Export checkpoint → ONNX → đẩy lên MinIO → verify round-trip bằng `onnxruntime` → upload `model.onnx` làm artifact. Job `triton-smoke` (tuỳ chọn) chạy Triton thật và gọi infer. |
+
+`release-model.yml` gắn vào PR `dev` → `prod` vì đó là cổng cuối trước khi code được coi là chạy thật.
 
 MinIO của nhóm chạy ở `localhost` nên runner GitHub không kết nối được. CI vì vậy dựng **MinIO ephemeral** trong job để kiểm chứng trọn pipeline export → upload → load; file ONNX được đẩy lên GitHub artifact để tải về dùng thật.
 
 CI **không train model** (theo PLAN §1.3) — job `release-model` sinh checkpoint random đúng kiến trúc chỉ để kiểm tra đường ống.
 
-> **Số lớp: model 6 ≠ dataset 9.** Model đang serve là [`conan17970/convnextv2-skin-cancer-isic2019`](https://huggingface.co/conan17970/convnextv2-skin-cancer-isic2019) — ConvNeXtV2-tiny fine-tune trên ISIC 2019, **6 lớp** `ACK · BCC · MEL · NEV · SCC · SEK`. Dataset `ingest.py` tải về là bộ Kaggle **9 lớp**, dùng cho EDA và train lại sau này. `test_model_validation.py` canh cho `NUM_CLASSES`, `CLASSES`, `labels.txt` và `config.pbtxt` khớp nhau **theo model đang serve**, không theo dataset.
-
-### Chạy trước khi push (giống hệt CI)
-
-```powershell
-python -m pip install -r requirements-dev.txt
-
-ruff check .
-ruff format --check .
-pytest
-```
-
-Hoặc để `pre-commit` tự lo phần lint:
-
-```powershell
-pre-commit install
-pre-commit run --all-files
-```
-
-## CI/CD (GitHub Actions)
-
-| Workflow | Chạy khi | Làm gì |
-|---|---|---|
-| [`ci.yml`](.github/workflows/ci.yml) | mọi push + PR vào `main`/`dev` | `ruff` lint + format · `pytest` (unit, data-quality, model-validation) + coverage · validate `docker-compose.yml`, Prometheus rules, Grafana dashboard |
-| [`release-model.yml`](.github/workflows/release-model.yml) | PR vào `main` · tag `model-v*` · chạy tay | Export `.pth` → ONNX → đẩy lên MinIO → verify round-trip bằng `onnxruntime` → upload `model.onnx` làm artifact. Job `triton-smoke` (tuỳ chọn) chạy Triton thật và gọi infer. |
-
-MinIO của nhóm chạy ở `localhost` nên runner GitHub không kết nối được. CI vì vậy dựng **MinIO ephemeral** trong job để kiểm chứng trọn pipeline export → upload → load; file ONNX được đẩy lên GitHub artifact để tải về dùng thật.
-
-CI **không train model** (theo PLAN §1.3) — job `release-model` sinh checkpoint random đúng kiến trúc chỉ để kiểm tra đường ống.
-
-> **Số lớp: model 6 ≠ dataset 9.** Model đang serve là [`conan17970/convnextv2-skin-cancer-isic2019`](https://huggingface.co/conan17970/convnextv2-skin-cancer-isic2019) — ConvNeXtV2-tiny fine-tune trên ISIC 2019, **6 lớp** `ACK · BCC · MEL · NEV · SCC · SEK`. Dataset `ingest.py` tải về là bộ Kaggle **9 lớp**, dùng cho EDA và train lại sau này. `test_model_validation.py` canh cho `NUM_CLASSES`, `CLASSES`, `labels.txt` và `config.pbtxt` khớp nhau **theo model đang serve**, không theo dataset.
+> **Contract 9 lớp.** `training/model.py` là nguồn duy nhất định nghĩa `CLASS_NAMES` (9 lớp ISIC Kaggle), `NUM_CLASSES`, `IMAGE_SIZE`. `labels.txt` và `config.pbtxt` phải khớp; `validate_checkpoint()` chặn mọi checkpoint lệch class order hoặc input size, nên checkpoint sai contract sẽ fail ngay ở bước export chứ không lọt xuống Triton.
 
 ### Chạy trước khi push (giống hệt CI)
 
