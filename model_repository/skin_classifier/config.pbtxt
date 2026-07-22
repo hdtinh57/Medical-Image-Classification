@@ -26,6 +26,9 @@ dynamic_batching {
   max_queue_delay_microseconds: 5000
 }
 
+# Keep the active candidate and its predecessor available for targeted rollback.
+version_policy: { latest { num_versions: 2 } }
+
 instance_group [
   {
     count: 1

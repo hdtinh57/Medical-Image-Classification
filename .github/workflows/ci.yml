@@ -1,5 +1,4 @@
-# CI chạy mọi push/PR. KHÔNG train, KHÔNG kéo image Triton — việc nặng nằm ở
-# release-model.yml. Job test cần torch (CPU wheel) vì suite đã cover training/.
+# Lightweight source/config CI. Full training runs in train-model.yml on a trusted GPU runner.
 name: CI
 
 # Luồng: feat/** -> dev -> prod. main là default branch (docs/mốc ổn định).
@@ -10,14 +9,12 @@ on:
   pull_request:
     branches: [main, dev, prod]
 
-# Push liên tiếp -> huỷ run cũ, không xếp hàng tốn CI minutes.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   PYTHON_VERSION: "3.11"
-  # Phải khớp .pre-commit-config.yaml, lệch version = local pass / CI fail.
   RUFF_VERSION: "0.8.6"
 
 jobs:
@@ -25,16 +22,15 @@ jobs:
     name: Lint (ruff)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - run: pip install ruff==${{ env.RUFF_VERSION }}
+      - run: python -m pip install ruff==${{ env.RUFF_VERSION }}
 
-      # --output-format=github -> lỗi hiện annotation ngay trên diff của PR
       - name: ruff check
         run: ruff check --output-format=github .
 
@@ -42,12 +38,12 @@ jobs:
         run: ruff format --check .
 
   test:
-    name: Unit + data-quality + model-validation
+    name: Unit + data-quality + model-contract
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -55,41 +51,39 @@ jobs:
             requirements.txt
             requirements-dev.txt
 
-      # requirements.txt kéo torch/torchvision. Trên PyPI bản Linux mặc định là
-      # wheel CUDA (~2.5GB) -> cài CPU wheel TRƯỚC, pip thấy đã thoả version thì bỏ qua.
-      - name: Cài deps (torch CPU wheel)
+      - name: Install CPU model and test dependencies
         run: |
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install -r requirements-dev.txt
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements-dev.txt
 
       - name: pytest
         run: pytest --cov=training --cov-report=term-missing --cov-report=xml
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: coverage-xml
           path: coverage.xml
           if-no-files-found: ignore
+          retention-days: 14
 
   validate-config:
     name: Validate compose + Prometheus + Grafana
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      # Bắt lỗi cú pháp/biến thiếu trong compose trước khi ai đó `up` thất bại.
       - name: docker compose config
         run: docker compose config --quiet
 
-      # promtool validate cả prometheus.yml lẫn alert_rules.yml (qua rule_files).
       - name: promtool check config
         run: |
           docker run --rm --entrypoint promtool \
             -v "${{ github.workspace }}/monitoring/prometheus:/etc/prometheus:ro" \
             prom/prometheus:latest check config /etc/prometheus/prometheus.yml
 
-      - name: Grafana dashboards là JSON hợp lệ
+      - name: Grafana dashboards are valid JSON
         run: |
           shopt -s nullglob
           for f in monitoring/grafana/dashboards/*.json; do

@@ -1,123 +1,142 @@
-# INFRA — Serving & Observability (MinIO · Triton · Prometheus · Grafana)
+# INFRA — MinIO, Triton và Protected Model Deployment
 
-Slice của **vai Serving/Infra + Observability**.
-Nhiệm vụ: **KÉO model có sẵn từ MinIO → convert ONNX → Triton serve**, và dựng monitoring.
-Bước train + đẩy `.pth` lên MinIO là của **team train** (không thuộc slice này).
+## Purpose
 
-## Phân chia bucket trên MinIO
+Docker Compose supplies the persistent serving and observability runtime:
 
-| Bucket | Chứa | Ai ghi |
-|---|---|---|
-| `model-registry` | Checkpoint `.pth` theo version: `skin_classifier/<N>/best_checkpoint.pth` | **Team train** đẩy lên |
-| `models` | Triton repo (ONNX): `skin_classifier/config.pbtxt`, `labels.txt`, `<N>/model.onnx` | **export_triton.py** (slice này) |
-
-Version ONNX trong Triton = version `.pth` trong registry (1:1).
-
-## Luồng
-
-```
-[team train] ──push .pth──►  MinIO: model-registry/skin_classifier/<N>/best_checkpoint.pth
-                                          │
-                                          │  export_triton.py  (KÉO xuống)
-                                          ▼
-                                   convert -> ONNX
-                                          │  (ĐẨY lên)
-                                          ▼
-                             MinIO: models/skin_classifier/<N>/model.onnx
-                                          │  (Triton đọc qua S3, poll 30s)
-                                          ▼
-   client ──► Triton :8000 (REST) ──► kết quả ;  :8002/metrics ──► Prometheus :9090 ──► Grafana :3000
+```text
+MinIO → Triton (ONNX Runtime) → Prometheus → Grafana
 ```
 
-## 0. Yêu cầu
-- **Docker Desktop** đang chạy.
-- **Python 3.10+** + deps để convert: `pip install torch timm onnx onnxruntime boto3`
-- Image `nvcr.io/nvidia/tritonserver:24.08-py3` khá nặng (vài GB) — lần đầu pull sẽ lâu.
+Training and candidate selection are performed by `training/pipeline.py` on a trusted CUDA runner.
+The release workflow then promotes a checksummed candidate through a protected deployment job. The
+Compose stack does **not** train models, hold CI artifacts, or restart automatically on every model
+release.
 
-## 1. Bật cụm hạ tầng
-```bash
+## Buckets and version contract
+
+| Bucket | Key layout | Writer | Rule |
+|---|---|---|---|
+| `model-registry` | `skin_classifier/<N>/best_checkpoint.pth` | `training.deploy` | Immutable checkpoint version |
+| `model-registry` | `skin_classifier/<N>/{candidate,quality_gate,deployment}.json` | pipeline/deployer | Candidate provenance and audit |
+| `model-registry` | `skin_classifier/production.json` | deployer | Mutable pointer written only after successful smoke test |
+| `models` | `skin_classifier/config.pbtxt`, `labels.txt`, `<N>/model.onnx` | exporter/deployer | Triton model repository |
+
+`<N>` is a positive, monotonically increasing integer. Deployment refuses to overwrite a checkpoint or ONNX version, and rejects a candidate that is not newer than every registry/Triton version so unversioned `latest` routing cannot move backward. Triton is configured with `version_policy` to keep two latest versions, so the previous model remains available while a new candidate is validated.
+
+## Start the local runtime
+
+Requirements: Docker Desktop is running and no unrelated process is using ports 9000, 9001, 8000,
+8001, 8002, 9090 or 3000.
+
+```powershell
 docker compose up -d
-docker compose ps      # minio/triton/prometheus/grafana 'running'; minio-init 'exited (0)' là đúng
-```
-Lúc này bucket `models` còn trống → Triton chạy `--exit-on-error=false`, đứng chờ (poll), chưa có model. Bình thường.
-
-## 2. Đưa model vào Triton (nhiệm vụ chính của slice)
-
-**Trường hợp thật:** team train đã đẩy `.pth` lên `model-registry`. Bạn chỉ chạy:
-```bash
-python -m training.export_triton --upload            # lấy version mới nhất
-# hoặc chỉ định: python -m training.export_triton --version 2 --upload
+docker compose ps
 ```
 
-**Test độc lập** (team train chưa đẩy) — dùng file `.pth` local, bỏ qua bước pull:
-```bash
-python -m training.export_triton --local-checkpoint artifacts/training/runs/<run>/best_checkpoint.pth
-# thêm --upload chỉ khi muốn publish lên MinIO
-```
+Expected state:
 
-Script sẽ: kéo `.pth` → convert `model.onnx` → đẩy `config.pbtxt` + `labels.txt` + `model.onnx` lên `s3://models/skin_classifier/`. Triton tự nạp trong ~30s.
+- `minio`, `triton`, `prometheus`, `grafana`: running;
+- `minio-init`: exited with code `0` after creating buckets;
+- Triton may be healthy but return model `404` before a model version is published. This is normal:
+  it polls MinIO every 30 seconds and uses `--exit-on-error=false`.
 
-## 3. Cổng & truy cập
+Development URLs:
 
-| Service | URL | Ghi chú |
-|---|---|---|
-| MinIO console | http://localhost:9001 | minioadmin / minioadmin |
-| Triton REST | http://localhost:8000 | v2 inference protocol |
-| Triton metrics | http://localhost:8002/metrics | Prometheus scrape |
-| Prometheus | http://localhost:9090 | `/targets`, `/alerts` |
-| Grafana | http://localhost:3000 | admin / admin → dashboard *Triton — Skin Classifier Serving* |
-
-## 4. Kiểm tra (verify)
-```bash
-curl http://localhost:8000/v2/health/ready                    # server sẵn sàng -> 200
-curl http://localhost:8000/v2/models/skin_classifier/ready    # model đã nạp -> 200
-curl http://localhost:8000/v2/models/skin_classifier          # metadata input/output/labels
-curl -s http://localhost:8002/metrics | grep nv_inference_request_success
-```
-Smoke-test suy luận (tensor ngẫu nhiên — tiền xử lý ảnh thật nằm ở gateway):
-```bash
-pip install "tritonclient[http]" numpy
-```
-```python
-import numpy as np, tritonclient.http as http
-c = http.InferenceServerClient(url="localhost:8000")
-x = np.random.rand(1, 3, 224, 224).astype(np.float32)
-inp = http.InferInput("input", x.shape, "FP32"); inp.set_data_from_numpy(x)
-out = c.infer("skin_classifier", [inp], outputs=[http.InferRequestedOutput("logits")])
-print(out.as_numpy("logits").shape)   # -> (1, 9)
-```
-
-## 5. Cập nhật model mới (retrain)
-1. Team train đẩy version mới (vd. `2`) lên `model-registry`.
-2. Bạn chạy `python -m training.export_triton --version 2 --upload` (hoặc bỏ version để lấy mới nhất).
-3. Triton poll thấy `skin_classifier/2/` → nạp và phục vụ version mới. Không cần restart.
-
-## 6. Dừng / dọn
-```bash
-docker compose down        # giữ dữ liệu
-docker compose down -v      # xoá luôn volume MinIO/Grafana
-```
-
-## 7. Cách Triton đọc từ MinIO
-```
---model-repository=s3://http://minio:9000/models
-                        └scheme┘ └host:port┘ └bucket┘
-```
-Credentials lấy từ env `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (= user/pass MinIO trong compose). Bucket `models` là gốc model repository.
-
-## 8. Troubleshooting
-
-| Triệu chứng | Xử lý |
+| Service | URL |
 |---|---|
-| `export_triton` báo "chưa có version trong registry" | Team train chưa đẩy `.pth`. Test local bằng `--local-checkpoint`. |
-| Triton `/v2/models/skin_classifier/ready` = 404 | Chưa export, hoặc chờ poll (30s). Xem `docker compose logs -f triton`. |
-| Triton không kết nối MinIO | Sai `AWS_*` env / endpoint; kiểm tra bucket `models` trong MinIO console. |
-| `pull access denied` khi kéo Triton | Image NGC nặng/mạng chậm; thử lại hoặc đổi tag mới hơn. |
-| Prometheus `gateway` DOWN | Bình thường — gateway do team serving làm sau. `triton` phải UP. |
-| ONNX export lỗi | Giữ opset 18 và kiểm tra phiên bản `torch`, `onnx`, `onnxscript`, `onnxruntime` theo `requirements.txt`. |
+| MinIO console | http://localhost:9001 |
+| Triton REST | http://localhost:8000 |
+| Triton metrics | http://localhost:8002/metrics |
+| Prometheus | http://localhost:9090 |
+| Grafana | http://localhost:3000 |
 
-## 9. Phối hợp / việc liên quan
-- **Team train:** viết bước đẩy `.pth` (versioned) lên `model-registry`.
-- **Gateway (serving):** FastAPI nhận ảnh → tiền xử lý (resize 224 + normalize ImageNet) → gọi Triton → Grad-CAM. Đã chừa `job=gateway` trong Prometheus + panel Grafana.
-- **CI/CD:** GitHub Actions có thể gọi `export_triton.py` để tự đẩy ONNX khi có model mới.
-- **Đổi credentials** MinIO/Grafana trước khi để repo public.
+The Compose credentials are development-only defaults. Do not reuse them in a public or production
+deployment.
+
+## Normal automated promotion path
+
+```text
+Train candidate model workflow (trusted CUDA runner)
+→ candidate-bundle artifact
+→ Release model package job (checksum + quality gate + ONNX parity)
+→ GitHub Environment model-production approval
+→ protected deploy runner
+→ MinIO registry + Triton repository
+→ Triton ready + `(1, 9)` smoke inference
+→ production.json updated
+```
+
+The protected deploy job requires these **environment-scoped** secrets, configured in GitHub
+Environment `model-production`:
+
+```text
+MINIO_ENDPOINT
+MINIO_ACCESS_KEY
+MINIO_SECRET_KEY
+TRITON_HTTP_URL
+```
+
+The release package job never receives these secrets. It verifies the artifact from a successful
+trusted `main` training workflow before the protected job is even eligible to run.
+
+## Local operator recovery path
+
+Use this only after the runtime is already up and when an authorized operator has received explicit
+credentials. The command refuses to use fallback demo credentials:
+
+```powershell
+$env:MINIO_ENDPOINT = "https://minio.example.internal"
+$env:MINIO_ACCESS_KEY = "<authorized-access-key>"
+$env:MINIO_SECRET_KEY = "<authorized-secret>"
+$env:TRITON_HTTP_URL = "https://triton.example.internal"
+
+python -m training.deploy --bundle-dir artifacts\pipeline\candidate\v2
+```
+
+The deployment transaction does this in order:
+
+1. validates every candidate-bundle checksum and repeats the Validation quality gate;
+2. compares macro F1 with `production.json` when a champion exists;
+3. registers immutable checkpoint/provenance/gate objects in `model-registry`;
+4. exports ONNX and verifies PyTorch/ONNX Runtime parity;
+5. publishes the exact ONNX version to `models`;
+6. waits no more than 60 seconds for
+   `/v2/models/skin_classifier/versions/<N>/ready`;
+7. calls version-specific inference and requires output `(1, 9)`;
+8. updates `production.json` only if every previous step succeeds.
+
+If Triton readiness or smoke inference fails, the transaction deletes only
+`models/skin_classifier/<N>/`. It retains the candidate checkpoint and writes a failed deployment
+record under `model-registry` for audit. It never kills/restarts the Compose stack and never deletes
+the prior production version.
+
+## Health verification
+
+```powershell
+curl.exe http://localhost:8000/v2/health/ready
+curl.exe http://localhost:8000/v2/models/skin_classifier/ready
+curl.exe http://localhost:8000/v2/models/skin_classifier
+curl.exe http://localhost:8002/metrics
+```
+
+To target a known version after it is deployed, use:
+
+```text
+/v2/models/skin_classifier/versions/<N>/ready
+/v2/models/skin_classifier/versions/<N>/infer
+```
+
+Prometheus scrapes Triton every 15 seconds. Grafana provisions the serving dashboard at startup.
+`GatewayDown` is currently expected because the FastAPI gateway has not been implemented or added
+to Compose.
+
+## Stop the local runtime
+
+```powershell
+docker compose down       # retains MinIO and Grafana volumes
+docker compose down -v    # destructive: removes local MinIO/Grafana volumes
+```
+
+Only run the second command when an authorized operator intentionally wants to discard local model
+and dashboard state.
