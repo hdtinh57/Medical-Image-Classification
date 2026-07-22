@@ -1,5 +1,5 @@
-# Triton model config — ConvNeXtV2 skin-cancer classifier (ISIC 2019, 6 lớp)
-# Backend ONNX Runtime, chạy CPU. Input/Output name khớp với export_triton.py.
+# Triton model config — Skin Cancer ISIC 9-class classifier
+# Backend ONNX Runtime; input/output names match training/export_triton.py.
 name: "skin_classifier"
 platform: "onnxruntime_onnx"
 max_batch_size: 16
@@ -16,18 +16,16 @@ output [
   {
     name: "logits"
     data_type: TYPE_FP32
-    dims: [ 6 ]
+    dims: [ 9 ]
     label_filename: "labels.txt"
   }
 ]
 
-# Gom nhiều request nhỏ thành batch để tăng throughput
 dynamic_batching {
   preferred_batch_size: [ 4, 8 ]
   max_queue_delay_microseconds: 5000
 }
 
-# Serve trên CPU (đề chạy không GPU)
 instance_group [
   {
     count: 1

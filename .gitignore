@@ -27,6 +27,7 @@ data/
 model/*.pth
 model_repository/**/*.onnx
 *.onnx
+*.onnx.data
 
 # Giữ lại config Triton (KHÔNG ignore): config.pbtxt, labels.txt
 
@@ -39,3 +40,6 @@ model_repository/**/*.onnx
 .coverage
 coverage.xml
 htmlcov/
+
+# Generated analysis artifacts
+artifacts/
