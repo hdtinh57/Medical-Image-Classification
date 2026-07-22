@@ -6,8 +6,10 @@
 name: Release model
 
 on:
+  # prod là cổng cuối trước khi code được coi là chạy thật -> verify trọn pipeline
+  # model ở đây, không phải ở main (main chỉ giữ docs/mốc ổn định).
   pull_request:
-    branches: [main]
+    branches: [prod]
   push:
     tags: ["model-v*"]
   workflow_dispatch:
@@ -47,10 +49,11 @@ jobs:
 
       # torch CPU wheel (~200MB) thay vì bản CUDA (~2.5GB) — runner không có GPU.
       # Cài torch TRƯỚC để timm không tự kéo bản CUDA từ PyPI về.
+      # onnxscript: bắt buộc cho torch.onnx.export(dynamo=True) trong export_triton.py.
       - name: Cài deps export (torch CPU)
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install timm onnx onnxruntime boto3
+          pip install timm onnx onnxscript onnxruntime boto3
 
       - name: Dựng MinIO ephemeral
         run: |
@@ -64,27 +67,34 @@ jobs:
           done
           curl -sf http://localhost:9000/minio/health/live
 
-      # Chưa có .pth thật trong CI -> sinh checkpoint random đúng ARCH/NUM_CLASSES
-      # đọc từ export_triton.py (không hardcode lại, tránh lệch).
+      # Chưa có checkpoint thật trong CI -> sinh checkpoint random qua build_checkpoint()
+      # để đúng format tự mô tả mà validate_checkpoint() yêu cầu (không hardcode lại).
       # Đây là test pipeline, KHÔNG phải train — đúng nguyên tắc "không train trong CI".
       - name: Sinh checkpoint giả để test pipeline
         run: |
           python - <<'PY'
-          import torch, timm
-          from training.export_triton import ARCH, NUM_CLASSES
           from pathlib import Path
 
+          import torch
+
+          from training.model import BASELINE_ARCH, NUM_CLASSES, build_checkpoint, create_model
+
           Path("model").mkdir(exist_ok=True)
-          model = timm.create_model(ARCH, pretrained=False, num_classes=NUM_CLASSES)
-          torch.save(model.state_dict(), "model/best_weights.pth")
-          print(f"checkpoint giả: {ARCH}, {NUM_CLASSES} lớp")
+          model = create_model(BASELINE_ARCH, pretrained=False)
+          torch.save(
+              build_checkpoint(model, architecture=BASELINE_ARCH, epoch=0, metrics={}),
+              "model/best_checkpoint.pth",
+          )
+          print(f"checkpoint giả: {BASELINE_ARCH}, {NUM_CLASSES} lớp")
           PY
 
+      # --upload: không có flag này script chỉ verify local, MinIO sẽ rỗng.
       - name: export_triton.py -> ONNX -> MinIO
         run: |
           python training/export_triton.py \
-            --local-weights model/best_weights.pth \
-            --version "${MODEL_VERSION}"
+            --local-checkpoint model/best_checkpoint.pth \
+            --version "${MODEL_VERSION}" \
+            --upload
 
       # Chứng minh upload thật sự thành công: kéo ONNX từ MinIO xuống rồi infer.
       # onnxruntime chính là backend Triton dùng (platform: onnxruntime_onnx).
@@ -92,7 +102,7 @@ jobs:
         run: |
           python - <<'PY'
           import os, tempfile, boto3, numpy as np, onnxruntime as ort
-          from training.export_triton import MODEL_NAME, NUM_CLASSES
+          from training.model import MODEL_NAME, NUM_CLASSES
 
           version = os.environ["MODEL_VERSION"]
           s3 = boto3.client(
@@ -152,7 +162,7 @@ jobs:
 
       - run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install timm onnx onnxruntime boto3 "tritonclient[http]" numpy
+          pip install timm onnx onnxscript onnxruntime boto3 "tritonclient[http]" numpy
 
       - name: Dựng MinIO + đẩy model
         run: |
@@ -164,17 +174,26 @@ jobs:
             sleep 2
           done
           python - <<'PY'
-          import torch, timm
           from pathlib import Path
-          from training.export_triton import ARCH, NUM_CLASSES
+
+          import torch
+
+          from training.model import BASELINE_ARCH, build_checkpoint, create_model
+
           Path("model").mkdir(exist_ok=True)
           torch.save(
-              timm.create_model(ARCH, pretrained=False, num_classes=NUM_CLASSES).state_dict(),
-              "model/best_weights.pth",
+              build_checkpoint(
+                  create_model(BASELINE_ARCH, pretrained=False),
+                  architecture=BASELINE_ARCH,
+                  epoch=0,
+                  metrics={},
+              ),
+              "model/best_checkpoint.pth",
           )
           PY
           python training/export_triton.py \
-            --local-weights model/best_weights.pth --version "${MODEL_VERSION}"
+            --local-checkpoint model/best_checkpoint.pth \
+            --version "${MODEL_VERSION}" --upload
 
       # --network host để Triton thấy MinIO ở localhost:9000, giống compose.
       - name: Chạy Triton
@@ -204,7 +223,7 @@ jobs:
         run: |
           python - <<'PY'
           import numpy as np, tritonclient.http as http
-          from training.export_triton import MODEL_NAME, NUM_CLASSES
+          from training.model import MODEL_NAME, NUM_CLASSES
 
           c = http.InferenceServerClient(url="localhost:8000")
           x = np.random.rand(1, 3, 224, 224).astype(np.float32)
