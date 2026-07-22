@@ -3,27 +3,26 @@
 from __future__ import annotations
 
 import argparse
-import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import boto3
 import numpy as np
 import torch
-from botocore.client import Config
 from botocore.exceptions import ClientError
 
 from training.model import CLASS_NAMES, MODEL_NAME, NUM_CLASSES, load_model_from_checkpoint
+from training.model_registry import (
+    ObjectAlreadyExistsError,
+    RegistrySettings,
+    create_s3_client,
+    ensure_bucket,
+    latest_version,
+    object_exists,
+)
 
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-REGISTRY_BUCKET = os.getenv("REGISTRY_BUCKET", "model-registry")
-TRITON_BUCKET = os.getenv("TRITON_BUCKET", "models")
 OPSET = 18
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = PROJECT_ROOT / "model_repository" / MODEL_NAME
 CONFIG_FILE = MODEL_DIR / "config.pbtxt"
@@ -37,6 +36,7 @@ class ExportConfig:
     version: int | None = None
     local_checkpoint: Path | None = None
     upload: bool = False
+    registry: RegistrySettings = field(default_factory=RegistrySettings.from_env)
 
 
 def parse_args() -> ExportConfig:
@@ -67,39 +67,9 @@ def parse_args() -> ExportConfig:
     )
 
 
-def s3_client() -> Any:
-    """Create one MinIO-compatible S3 client."""
-    return boto3.client(
-        "s3",
-        endpoint_url=MINIO_ENDPOINT,
-        aws_access_key_id=MINIO_ACCESS_KEY,
-        aws_secret_access_key=MINIO_SECRET_KEY,
-        region_name="us-east-1",
-        config=Config(signature_version="s3v4"),
-    )
-
-
-def ensure_bucket(client: Any, bucket: str) -> None:
-    """Create an output bucket only when it does not already exist."""
-    try:
-        client.head_bucket(Bucket=bucket)
-    except ClientError:
-        client.create_bucket(Bucket=bucket)
-        print(f"  + tạo bucket '{bucket}'")
-
-
-def latest_version(client: Any, bucket: str, model_name: str) -> int:
-    """Return the highest integer checkpoint version in a registry prefix."""
-    prefix = f"{model_name}/"
-    response = client.list_objects_v2(Bucket=bucket, Prefix=prefix, Delimiter="/")
-    versions = []
-    for common_prefix in response.get("CommonPrefixes", []):
-        part = common_prefix["Prefix"][len(prefix) :].strip("/")
-        if part.isdigit():
-            versions.append(int(part))
-    if not versions:
-        raise RuntimeError(f"Không có checkpoint version trong s3://{bucket}/{model_name}/")
-    return max(versions)
+def s3_client(settings: RegistrySettings | None = None) -> Any:
+    """Create a MinIO-compatible client for backward-compatible callers."""
+    return create_s3_client(settings or RegistrySettings.from_env())
 
 
 def resolve_checkpoint(config: ExportConfig, temporary_dir: Path) -> tuple[Path, int]:
@@ -107,14 +77,21 @@ def resolve_checkpoint(config: ExportConfig, temporary_dir: Path) -> tuple[Path,
     if config.local_checkpoint is not None:
         if not config.local_checkpoint.is_file():
             raise FileNotFoundError(config.local_checkpoint)
-        return config.local_checkpoint, config.version or 1
+        version = config.version or 1
+        if version < 1:
+            raise ValueError("Model version phải là số nguyên dương.")
+        return config.local_checkpoint, version
 
-    client = s3_client()
-    version = config.version or latest_version(client, REGISTRY_BUCKET, MODEL_NAME)
+    client = create_s3_client(config.registry)
+    version = config.version or latest_version(
+        client,
+        config.registry.registry_bucket,
+        MODEL_NAME,
+    )
     checkpoint_path = temporary_dir / "best_checkpoint.pth"
     key = f"{MODEL_NAME}/{version}/best_checkpoint.pth"
-    print(f"[export] tải checkpoint: s3://{REGISTRY_BUCKET}/{key}")
-    client.download_file(REGISTRY_BUCKET, key, str(checkpoint_path))
+    print(f"[export] tải checkpoint: s3://{config.registry.registry_bucket}/{key}")
+    client.download_file(config.registry.registry_bucket, key, str(checkpoint_path))
     return checkpoint_path, version
 
 
@@ -165,23 +142,43 @@ def write_labels() -> None:
     LABELS_FILE.write_text("\n".join(CLASS_NAMES) + "\n", encoding="utf-8")
 
 
-def upload_repository(version: int, onnx_path: Path) -> None:
-    """Upload verified Triton repository files to MinIO."""
-    client = s3_client()
-    ensure_bucket(client, TRITON_BUCKET)
-    uploads = [
+def upload_repository(config: ExportConfig, version: int, onnx_path: Path) -> None:
+    """Upload verified config plus one immutable Triton model version."""
+    client = create_s3_client(config.registry)
+    ensure_bucket(client, config.registry.triton_bucket)
+    version_uploads = _version_uploads(version, onnx_path)
+    existing = [
+        key
+        for _, key in version_uploads
+        if object_exists(client, config.registry.triton_bucket, key)
+    ]
+    if existing:
+        joined = ", ".join(existing)
+        raise ObjectAlreadyExistsError(f"Triton model version đã tồn tại: {joined}")
+
+    print(
+        f"[export] upload Triton repository -> "
+        f"s3://{config.registry.triton_bucket}/{MODEL_NAME}/"
+    )
+    for local_path, key in (
         (CONFIG_FILE, f"{MODEL_NAME}/config.pbtxt"),
         (LABELS_FILE, f"{MODEL_NAME}/labels.txt"),
-        (onnx_path, f"{MODEL_NAME}/{version}/model.onnx"),
-    ]
+    ):
+        client.upload_file(str(local_path), config.registry.triton_bucket, key)
+        print(f"  ↑ s3://{config.registry.triton_bucket}/{key}")
+    for local_path, key in version_uploads:
+        client.upload_file(str(local_path), config.registry.triton_bucket, key)
+        print(f"  ↑ s3://{config.registry.triton_bucket}/{key}")
+
+
+def _version_uploads(version: int, onnx_path: Path) -> list[tuple[Path, str]]:
+    """Return the model and optional external-data objects for one version."""
+    prefix = f"{MODEL_NAME}/{version}"
+    uploads = [(onnx_path, f"{prefix}/model.onnx")]
     external_data = onnx_path.with_name(f"{onnx_path.name}.data")
     if external_data.exists():
-        uploads.append((external_data, f"{MODEL_NAME}/{version}/{external_data.name}"))
-
-    print(f"[export] upload Triton repository -> s3://{TRITON_BUCKET}/{MODEL_NAME}/")
-    for local_path, key in uploads:
-        client.upload_file(str(local_path), TRITON_BUCKET, key)
-        print(f"  ↑ s3://{TRITON_BUCKET}/{key}")
+        uploads.append((external_data, f"{prefix}/{external_data.name}"))
+    return uploads
 
 
 def run_export(config: ExportConfig) -> Path:
@@ -196,7 +193,7 @@ def run_export(config: ExportConfig) -> Path:
         verify_onnx(output_path, dummy, pytorch_logits)
 
     if config.upload:
-        upload_repository(version, output_path)
+        upload_repository(config, version, output_path)
     else:
         print("[export] local verify hoàn tất; bỏ qua MinIO vì chưa truyền --upload.")
     return output_path
@@ -206,7 +203,14 @@ def main() -> int:
     """CLI entrypoint."""
     try:
         output_path = run_export(parse_args())
-    except (AssertionError, ClientError, OSError, RuntimeError, ValueError) as exc:
+    except (
+        AssertionError,
+        ClientError,
+        ObjectAlreadyExistsError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
         print(f"[export] lỗi: {exc}")
         return 1
     print(f"[export] DONE: {output_path}")

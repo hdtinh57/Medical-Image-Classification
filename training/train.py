@@ -90,6 +90,15 @@ class EpochResult:
     metrics: dict[str, float]
 
 
+@dataclass(frozen=True)
+class TrainingResult:
+    """Artifacts and optional MLflow identity from one completed training run."""
+
+    best_checkpoint: Path
+    run_dir: Path
+    mlflow_run_id: str | None
+
+
 def parse_args() -> TrainConfig:
     """Parse command-line options into a validated training configuration."""
     parser = argparse.ArgumentParser(description="Train Skin Cancer ISIC 9-class model.")
@@ -432,10 +441,10 @@ def configure_local_mlflow_experiment() -> None:
 def mlflow_run(
     config: TrainConfig,
     config_payload: dict[str, Any],
-) -> Iterator[bool]:
-    """Start optional local or remote MLflow tracking."""
+) -> Iterator[str | None]:
+    """Start optional local or remote MLflow tracking and yield its run ID."""
     if config.disable_mlflow:
-        yield False
+        yield None
         return
     tracking_uri = config.mlflow_tracking_uri or default_mlflow_tracking_uri()
     mlflow.set_tracking_uri(tracking_uri)
@@ -443,13 +452,18 @@ def mlflow_run(
         configure_local_mlflow_experiment()
     else:
         mlflow.set_experiment(EXPERIMENT_NAME)
-    with mlflow.start_run(run_name=config.run_name):
+    with mlflow.start_run(run_name=config.run_name) as active_run:
         mlflow.log_params(config_payload)
-        yield True
+        yield active_run.info.run_id
 
 
 def train_model(config: TrainConfig) -> Path:
-    """Run the complete training pipeline and return the best checkpoint path."""
+    """Run training and return the best inference checkpoint for CLI callers."""
+    return train_model_with_result(config).best_checkpoint
+
+
+def train_model_with_result(config: TrainConfig) -> TrainingResult:
+    """Run training and retain metadata needed by orchestration code."""
     validate_config(config)
     seed_everything(config.seed)
     device = resolve_device(config.device)
@@ -480,7 +494,7 @@ def train_model(config: TrainConfig) -> Path:
     amp_enabled = config.amp and device.type == "cuda"
     scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
 
-    with mlflow_run(config, config_payload) as tracking_enabled:
+    with mlflow_run(config, config_payload) as run_id:
         best_checkpoint = _training_loop(
             config,
             run_dir,
@@ -491,11 +505,15 @@ def train_model(config: TrainConfig) -> Path:
             scheduler,
             scaler,
             device,
-            tracking_enabled,
+            tracking_enabled=run_id is not None,
         )
-        if tracking_enabled:
+        if run_id is not None:
             mlflow.log_artifacts(str(run_dir), artifact_path="training_run")
-    return best_checkpoint
+    return TrainingResult(
+        best_checkpoint=best_checkpoint,
+        run_dir=run_dir,
+        mlflow_run_id=run_id,
+    )
 
 
 def _training_loop(

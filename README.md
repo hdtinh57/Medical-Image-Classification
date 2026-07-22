@@ -63,24 +63,27 @@ python training/ingest.py --output D:\datasets\skin-cancer
 python training/ingest.py --force
 ```
 
-## CI/CD (GitHub Actions)
+## CI/CD và MLOps automation
 
-Luồng branch: `feat/**` → `dev` → `prod`. `main` là default branch, giữ mốc ổn định và docs.
-
-| Workflow | Chạy khi | Làm gì |
+| Workflow | Trigger | Vai trò |
 |---|---|---|
-| [`ci.yml`](.github/workflows/ci.yml) | push lên `main`/`dev`/`prod`/`feat/**` · PR vào `main`/`dev`/`prod` | `ruff` lint + format · `pytest` (unit, data-quality, model-validation) + coverage · validate `docker-compose.yml`, Prometheus rules, Grafana dashboard |
-| [`release-model.yml`](.github/workflows/release-model.yml) | PR vào `prod` · tag `model-v*` · chạy tay | Export checkpoint → ONNX → đẩy lên MinIO → verify round-trip bằng `onnxruntime` → upload `model.onnx` làm artifact. Job `triton-smoke` (tuỳ chọn) chạy Triton thật và gọi infer. |
+| [`ci.yml`](.github/workflows/ci.yml) | push/PR vào `main`, `dev`, `feat/**` | Ruff, pytest/coverage, Docker Compose, Prometheus và Grafana config validation. Không train model. |
+| [`train-model.yml`](.github/workflows/train-model.yml) | trusted push vào `main` hoặc chạy tay | Chạy trên self-hosted CUDA runner: ingest → EDA → grouped manifest → train → Validation/Test evaluation → MLflow → Validation quality gate → candidate artifact. |
+| [`release-model.yml`](.github/workflows/release-model.yml) | successful `Train candidate model` run trên `main`, hoặc manual source run ID | Xác minh checksum/gate + ONNX parity trên GitHub-hosted CPU; sau GitHub Environment approval, deploy immutable model version vào MinIO, chờ Triton ready và smoke inference `(1, 9)`. |
 
-`release-model.yml` gắn vào PR `dev` → `prod` vì đó là cổng cuối trước khi code được coi là chạy thật.
+`ci.yml` là CI nhẹ. Training không chạy trên GitHub-hosted runner và chỉ được thực hiện bởi runner tin cậy có labels `self-hosted`, `Windows`, `X64`, `mlops-train`. Release production dùng runner `mlops-deploy` và GitHub Environment `model-production` với required reviewers.
 
-MinIO của nhóm chạy ở `localhost` nên runner GitHub không kết nối được. CI vì vậy dựng **MinIO ephemeral** trong job để kiểm chứng trọn pipeline export → upload → load; file ONNX được đẩy lên GitHub artifact để tải về dùng thật.
+### Cấu hình GitHub bắt buộc trước khi bật Continuous Training/Deployment
 
-CI **không train model** (theo PLAN §1.3) — job `release-model` sinh checkpoint random đúng kiến trúc chỉ để kiểm tra đường ống.
+1. Đăng ký self-hosted training runner có CUDA với labels `self-hosted`, `Windows`, `X64`, `mlops-train`; cài Python, CUDA PyTorch và dependencies project.
+2. Đăng ký self-hosted deploy runner có network access tới MinIO/Triton với labels `self-hosted`, `Windows`, `X64`, `mlops-deploy`.
+3. Đặt repository secrets `KAGGLE_USERNAME`, `KAGGLE_KEY`; không in hoặc commit các giá trị này.
+4. Tạo Environment `model-production`, bật required reviewers và prevent self-review; đặt **environment secrets** `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `TRITON_HTTP_URL`.
+5. Tùy chọn repository variables: `MLOPS_DATA_DIR` (persistent dataset path) và `MLFLOW_TRACKING_URI` (remote tracking server). Không cấu hình thì workflow dùng đường dẫn/artifact mặc định local trên runner.
 
-> **Contract 9 lớp.** `training/model.py` là nguồn duy nhất định nghĩa `CLASS_NAMES` (9 lớp ISIC Kaggle), `NUM_CLASSES`, `IMAGE_SIZE`. `labels.txt` và `config.pbtxt` phải khớp; `validate_checkpoint()` chặn mọi checkpoint lệch class order hoặc input size, nên checkpoint sai contract sẽ fail ngay ở bước export chứ không lọt xuống Triton.
+Pipeline không overwrite model version; deploy yêu cầu version mới lớn hơn mọi version đã có trong registry/Triton để `latest` routing không quay về model cũ. Candidate chỉ được promotion khi Validation vượt quality gate mặc định `accuracy >= 0.50`, `balanced_accuracy >= 0.50`, `macro_f1 >= 0.50`, và không giảm macro F1 quá `0.02` so với champion. Kaggle Test chỉ phục vụ audit/report sau lựa chọn model, không gate promotion.
 
-### Chạy trước khi push (giống hệt CI)
+### Chạy kiểm tra trước khi push
 
 ```powershell
 python -m pip install -r requirements-dev.txt
@@ -233,3 +236,39 @@ python -m training.export_triton `
 
 Lệnh trên chỉ export và verify PyTorch/ONNX Runtime parity. Chỉ thêm `--upload` khi chủ động
 muốn publish model repository lên MinIO.
+
+### 6. Chạy candidate pipeline end-to-end tại local
+
+Lệnh này dùng cùng orchestration với `train-model.yml`. Nó download/EDA trừ khi dữ liệu đã có,
+train, evaluate Validation/Test, tạo `quality_gate.json` **theo Validation**, và sinh immutable
+candidate bundle. Lệnh trả exit code `1` khi candidate bị gate từ chối nhưng vẫn giữ diagnostics.
+
+```powershell
+python -m training.pipeline `
+  --version 2 `
+  --arch resnet18 `
+  --epochs 1 `
+  --max-train-batches 2 `
+  --max-val-batches 2 `
+  --min-accuracy 0 `
+  --min-balanced-accuracy 0 `
+  --min-macro-f1 0
+```
+
+Output nằm tại `artifacts/pipeline/candidate/v2/`; gồm checkpoint self-describing,
+`quality_gate.json`, Validation/Test reports, manifest/EDA evidence, checksums và provenance.
+Không truyền MinIO credentials hoặc `--upload` ở bước này.
+
+### 7. Manual recovery deploy (chỉ khi hạ tầng đã bật và credentials được cấp)
+
+Bình thường `release-model.yml` xử lý deploy có approval. Lệnh local bên dưới chỉ dành cho operator
+được ủy quyền, cần environment variables `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`,
+`MINIO_SECRET_KEY`, `TRITON_HTTP_URL`; không fallback sang credential demo.
+
+```powershell
+python -m training.deploy --bundle-dir artifacts\pipeline\candidate\v2
+```
+
+Deploy kiểm tra checksum/gate, đăng ký checkpoint versioned, export/upload ONNX, chờ Triton ready tối
+đa 60 giây và smoke-test logits `(1, 9)`. Nếu candidate Triton version lỗi, nó chỉ xóa prefix model
+candidate vừa publish và giữ previous production version cùng audit metadata.

@@ -1,242 +1,192 @@
-# Pipeline model: .pth -> ONNX -> MinIO (Triton model repository) -> verify.
-#
-# MinIO của nhóm chạy localhost, runner GitHub không kết nối được -> CI dựng
-# MinIO EPHEMERAL ngay trong job. Nó chứng minh trọn pipeline export+upload+load
-# chạy đúng; artifact ONNX được upload lên GitHub để tải về dùng thật.
+# Gated Continuous Delivery for artifacts produced by Train candidate model.
+# The package job never receives MinIO/Triton credentials. The protected deploy job
+# receives environment-scoped secrets only after model-production approval.
 name: Release model
 
 on:
-  # prod là cổng cuối trước khi code được coi là chạy thật -> verify trọn pipeline
-  # model ở đây, không phải ở main (main chỉ giữ docs/mốc ổn định).
-  pull_request:
-    branches: [prod]
-  push:
-    tags: ["model-v*"]
+  workflow_run:
+    workflows: ["Train candidate model"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
-      model_version:
-        description: "Version model trong Triton repo"
-        required: false
-        default: "1"
-      run_triton_smoke:
-        description: "Chạy luôn Triton thật (chậm ~10 phút, image vài GB)"
-        type: boolean
-        required: false
-        default: false
+      source_run_id:
+        description: "Successful Train candidate model workflow run ID from main"
+        required: true
+        type: string
 
 concurrency:
-  group: release-model-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-model-${{ github.event.workflow_run.head_sha || inputs.source_run_id }}
+  cancel-in-progress: false
 
-env:
-  PYTHON_VERSION: "3.11"
-  MODEL_VERSION: ${{ inputs.model_version || '1' }}
-  MINIO_ENDPOINT: http://localhost:9000
-  MINIO_ACCESS_KEY: minioadmin
-  MINIO_SECRET_KEY: minioadmin
+permissions:
+  actions: read
+  contents: read
 
 jobs:
-  export:
-    name: Export ONNX + đẩy lên MinIO
+  package:
+    name: Verify candidate and package ONNX
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      source_run_id: ${{ steps.source.outputs.run_id }}
+      model_version: ${{ steps.candidate.outputs.model_version }}
+    env:
+      MANUAL_SOURCE_RUN_ID: ${{ inputs.source_run_id || '' }}
+      WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id || '' }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      # torch CPU wheel (~200MB) thay vì bản CUDA (~2.5GB) — runner không có GPU.
-      # Cài torch TRƯỚC để timm không tự kéo bản CUDA từ PyPI về.
-      # onnxscript: bắt buộc cho torch.onnx.export(dynamo=True) trong export_triton.py.
-      - name: Cài deps export (torch CPU)
-        run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install timm onnx onnxscript onnxruntime boto3
-
-      - name: Dựng MinIO ephemeral
-        run: |
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
-          for _ in $(seq 30); do
-            curl -sf http://localhost:9000/minio/health/live && break
-            sleep 2
-          done
-          curl -sf http://localhost:9000/minio/health/live
-
-      # Chưa có checkpoint thật trong CI -> sinh checkpoint random qua build_checkpoint()
-      # để đúng format tự mô tả mà validate_checkpoint() yêu cầu (không hardcode lại).
-      # Đây là test pipeline, KHÔNG phải train — đúng nguyên tắc "không train trong CI".
-      - name: Sinh checkpoint giả để test pipeline
+      # Re-query the workflow run for both event paths. This prevents a manually
+      # supplied run ID or a fork-originated workflow artifact becoming deploy input.
+      - name: Validate trusted source workflow run
+        id: source
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python - <<'PY'
+          import json
+          import os
+          from urllib.request import Request, urlopen
+
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          run_id = os.environ["WORKFLOW_RUN_ID"] if event_name == "workflow_run" else os.environ["MANUAL_SOURCE_RUN_ID"]
+          if not run_id.isdigit() or int(run_id) < 1:
+              raise SystemExit("source_run_id must be a positive workflow run ID")
+          request = Request(
+              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{run_id}",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+              },
+          )
+          with urlopen(request, timeout=20) as response:
+              source = json.loads(response.read().decode("utf-8"))
+          head_repository = source.get("head_repository") or {}
+          trusted = (
+              source.get("conclusion") == "success"
+              and source.get("head_branch") == "main"
+              and source.get("name") == "Train candidate model"
+              and head_repository.get("full_name") == os.environ["GITHUB_REPOSITORY"]
+          )
+          if not trusted:
+              raise SystemExit("source run is not a successful trusted main training workflow")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"run_id={run_id}\nsha={source['head_sha']}\n")
+          PY
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install CPU export dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt --upgrade-strategy only-if-needed
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: candidate-bundle
+          path: ${{ runner.temp }}/candidate-bundle
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify bundle and ONNX numerical parity
+        id: candidate
+        env:
+          CANDIDATE_ROOT: ${{ runner.temp }}/candidate-bundle
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          python - <<'PY'
+          import os
           from pathlib import Path
 
-          import torch
+          from training.deploy import load_candidate_bundle
+          from training.export_triton import ExportConfig, run_export
+          from training.quality_gate import evaluate_quality_gate
 
-          from training.model import BASELINE_ARCH, NUM_CLASSES, build_checkpoint, create_model
-
-          Path("model").mkdir(exist_ok=True)
-          model = create_model(BASELINE_ARCH, pretrained=False)
-          torch.save(
-              build_checkpoint(model, architecture=BASELINE_ARCH, epoch=0, metrics={}),
-              "model/best_checkpoint.pth",
+          candidates = list(Path(os.environ["CANDIDATE_ROOT"]).rglob("candidate.json"))
+          if len(candidates) != 1:
+              raise SystemExit(f"expected exactly one candidate bundle, found {len(candidates)}")
+          bundle_dir = candidates[0].parent
+          candidate = load_candidate_bundle(bundle_dir)
+          if candidate.metadata["git_sha"] != os.environ["SOURCE_SHA"]:
+              raise SystemExit("candidate Git SHA does not match the trusted source workflow")
+          if not evaluate_quality_gate(candidate.validation_metrics, candidate.thresholds).passed:
+              raise SystemExit("candidate did not pass the re-evaluated Validation gate")
+          onnx_path = run_export(
+              ExportConfig(
+                  version=candidate.version,
+                  local_checkpoint=candidate.checkpoint_path,
+                  upload=False,
+              )
           )
-          print(f"checkpoint giả: {BASELINE_ARCH}, {NUM_CLASSES} lớp")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"model_version={candidate.version}\n")
+              output.write(f"bundle_dir={bundle_dir}\n")
+              output.write(f"onnx_path={onnx_path}\n")
           PY
 
-      # --upload: không có flag này script chỉ verify local, MinIO sẽ rỗng.
-      - name: export_triton.py -> ONNX -> MinIO
-        run: |
-          python training/export_triton.py \
-            --local-checkpoint model/best_checkpoint.pth \
-            --version "${MODEL_VERSION}" \
-            --upload
-
-      # Chứng minh upload thật sự thành công: kéo ONNX từ MinIO xuống rồi infer.
-      # onnxruntime chính là backend Triton dùng (platform: onnxruntime_onnx).
-      - name: Verify round-trip qua MinIO
-        run: |
-          python - <<'PY'
-          import os, tempfile, boto3, numpy as np, onnxruntime as ort
-          from training.model import MODEL_NAME, NUM_CLASSES
-
-          version = os.environ["MODEL_VERSION"]
-          s3 = boto3.client(
-              "s3",
-              endpoint_url=os.environ["MINIO_ENDPOINT"],
-              aws_access_key_id=os.environ["MINIO_ACCESS_KEY"],
-              aws_secret_access_key=os.environ["MINIO_SECRET_KEY"],
-              region_name="us-east-1",
-          )
-          keys = [o["Key"] for o in s3.list_objects_v2(Bucket="models").get("Contents", [])]
-          print("objects trên MinIO:", keys)
-          for required in (f"{MODEL_NAME}/config.pbtxt", f"{MODEL_NAME}/labels.txt",
-                           f"{MODEL_NAME}/{version}/model.onnx"):
-              assert required in keys, f"thiếu {required} trên MinIO"
-
-          with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
-              s3.download_fileobj("models", f"{MODEL_NAME}/{version}/model.onnx", f)
-              path = f.name
-
-          sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-          x = np.random.rand(1, 3, 224, 224).astype(np.float32)
-          out = sess.run(None, {"input": x})[0]
-          assert out.shape == (1, NUM_CLASSES), out.shape
-          print(f"round-trip OK, logits shape = {out.shape}")
-          PY
-
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: skin_classifier-onnx-v${{ env.MODEL_VERSION }}
+          name: release-bundle
           path: |
-            model_repository/skin_classifier/${{ env.MODEL_VERSION }}/model.onnx
-            model_repository/skin_classifier/config.pbtxt
-            model_repository/skin_classifier/labels.txt
+            ${{ runner.temp }}/candidate-bundle/
+            model_repository/skin_classifier/
           if-no-files-found: error
+          retention-days: 30
 
-      - name: Dọn MinIO
-        if: always()
-        run: docker rm -f minio || true
-
-  triton-smoke:
-    name: Triton load + infer (chạy tay)
-    if: inputs.run_triton_smoke
-    runs-on: ubuntu-latest
+  deploy:
+    name: Protected MinIO and Triton deployment
+    needs: package
+    if: needs.package.result == 'success'
+    runs-on: [self-hosted, Windows, X64, mlops-deploy]
+    environment:
+      name: model-production
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-
-      # Image Triton vài GB — dọn chỗ trước kẻo hết disk giữa chừng.
-      - name: Giải phóng disk
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          df -h /
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
+          ref: ${{ needs.package.outputs.source_sha }}
 
-      - run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install timm onnx onnxscript onnxruntime boto3 "tritonclient[http]" numpy
-
-      - name: Dựng MinIO + đẩy model
+      # mlops-deploy must be provisioned with a compatible Python/CUDA environment.
+      # This only fills missing project dependencies and must not substitute demo secrets.
+      - name: Install missing deployment dependencies
+        shell: pwsh
         run: |
-          docker run -d --name minio --network host \
-            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
-          for _ in $(seq 30); do
-            curl -sf http://localhost:9000/minio/health/live && break
-            sleep 2
-          done
-          python - <<'PY'
-          from pathlib import Path
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt --upgrade-strategy only-if-needed
 
-          import torch
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-bundle
+          path: ${{ runner.temp }}/release-bundle
+          github-token: ${{ github.token }}
 
-          from training.model import BASELINE_ARCH, build_checkpoint, create_model
-
-          Path("model").mkdir(exist_ok=True)
-          torch.save(
-              build_checkpoint(
-                  create_model(BASELINE_ARCH, pretrained=False),
-                  architecture=BASELINE_ARCH,
-                  epoch=0,
-                  metrics={},
-              ),
-              "model/best_checkpoint.pth",
-          )
-          PY
-          python training/export_triton.py \
-            --local-checkpoint model/best_checkpoint.pth \
-            --version "${MODEL_VERSION}" --upload
-
-      # --network host để Triton thấy MinIO ở localhost:9000, giống compose.
-      - name: Chạy Triton
+      - name: Register, publish, smoke test, and promote
+        shell: pwsh
+        env:
+          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
+          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          TRITON_HTTP_URL: ${{ secrets.TRITON_HTTP_URL }}
         run: |
-          docker run -d --name triton --network host \
-            -e AWS_ACCESS_KEY_ID=minioadmin \
-            -e AWS_SECRET_ACCESS_KEY=minioadmin \
-            -e AWS_DEFAULT_REGION=us-east-1 \
-            nvcr.io/nvidia/tritonserver:24.08-py3 \
-            tritonserver --model-repository=s3://http://localhost:9000/models \
-                         --model-control-mode=poll --repository-poll-secs=10 \
-                         --exit-on-error=false --allow-metrics=true --metrics-port=8002
-
-      - name: Chờ model ready
-        run: |
-          for _ in $(seq 60); do
-            if curl -sf http://localhost:8000/v2/models/skin_classifier/ready; then
-              echo "model ready"; exit 0
-            fi
-            sleep 5
-          done
-          echo "::error::Triton không nạp được model trong 5 phút"
-          docker logs triton | tail -50
-          exit 1
-
-      - name: Smoke infer qua Triton
-        run: |
-          python - <<'PY'
-          import numpy as np, tritonclient.http as http
-          from training.model import MODEL_NAME, NUM_CLASSES
-
-          c = http.InferenceServerClient(url="localhost:8000")
-          x = np.random.rand(1, 3, 224, 224).astype(np.float32)
-          inp = http.InferInput("input", x.shape, "FP32")
-          inp.set_data_from_numpy(x)
-          out = c.infer(MODEL_NAME, [inp], outputs=[http.InferRequestedOutput("logits")])
-          assert out.as_numpy("logits").shape == (1, NUM_CLASSES)
-          print("Triton infer OK")
-          PY
-
-      - name: Triton có phát metrics cho Prometheus
-        run: curl -sf http://localhost:8002/metrics | grep nv_inference_request_success
-
-      - name: Dọn
-        if: always()
-        run: docker rm -f triton minio || true
+          $candidates = Get-ChildItem -Path "$env:RUNNER_TEMP\release-bundle" -Filter candidate.json -Recurse
+          if ($candidates.Count -ne 1) {
+            throw "Expected exactly one candidate.json in release-bundle; found $($candidates.Count)."
+          }
+          $bundleDir = $candidates[0].Directory.FullName
+          python -m training.deploy --bundle-dir "$bundleDir" --timeout-seconds 60 --poll-seconds 3

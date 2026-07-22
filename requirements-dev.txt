@@ -1,5 +1,5 @@
-# Dev/CI only — KHÔNG cài vào runtime image.
-# pytest do requirements.txt pin (suite cover cả training/); ở đây chỉ thêm plugin.
+# Development and CI checks. The model-contract tests import torch/timm,
+# so CI installs CPU wheels first and then resolves this full dependency set.
 -r requirements.txt
 
-pytest-cov>=6.0,<8.0
+pytest-cov>=6.0,<7.0

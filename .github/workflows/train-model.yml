@@ -1,0 +1,99 @@
+# Continuous Training runs only on a trusted, pre-provisioned GPU runner.
+# Required runner labels: self-hosted, Windows, X64, mlops-train.
+name: Train candidate model
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "training/**"
+      - "tests/**"
+      - "requirements*.txt"
+      - "pyproject.toml"
+      - ".github/workflows/train-model.yml"
+  workflow_dispatch:
+    inputs:
+      model_version:
+        description: "Immutable positive Triton/registry model version (defaults to this workflow run number)"
+        required: false
+        type: string
+      architecture:
+        description: "timm architecture"
+        required: false
+        default: "convnextv2_tiny.fcmae_ft_in22k_in1k"
+        type: string
+      epochs:
+        description: "Training epochs"
+        required: false
+        default: "20"
+        type: string
+      batch_size:
+        description: "Training batch size"
+        required: false
+        default: "16"
+        type: string
+
+concurrency:
+  group: train-candidate-main
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  train:
+    name: Train, evaluate, and gate candidate
+    runs-on: [self-hosted, Windows, X64, mlops-train]
+    timeout-minutes: 180
+    env:
+      KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+      KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      MLOPS_DATA_DIR: ${{ vars.MLOPS_DATA_DIR }}
+      MLFLOW_TRACKING_URI: ${{ vars.MLFLOW_TRACKING_URI }}
+      INPUT_MODEL_VERSION: ${{ inputs.model_version || '' }}
+      INPUT_ARCHITECTURE: ${{ inputs.architecture || 'convnextv2_tiny.fcmae_ft_in22k_in1k' }}
+      INPUT_EPOCHS: ${{ inputs.epochs || '20' }}
+      INPUT_BATCH_SIZE: ${{ inputs.batch_size || '16' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # The runner is intentionally GPU-capable and pre-provisioned. Pip resolves
+      # only missing packages; its CUDA PyTorch wheel must already satisfy requirements.txt.
+      - name: Install missing project dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt --upgrade-strategy only-if-needed
+          python -c "import torch; assert torch.cuda.is_available(), 'mlops-train runner needs CUDA'; print(torch.__version__, torch.cuda.get_device_name(0))"
+
+      - name: Run trusted continuous-training pipeline
+        shell: pwsh
+        run: |
+          $version = if ($env:INPUT_MODEL_VERSION) { $env:INPUT_MODEL_VERSION } else { $env:GITHUB_RUN_NUMBER }
+          $candidateRoot = Join-Path $env:RUNNER_TEMP "candidate-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $arguments = @(
+            "-m", "training.pipeline",
+            "--version", $version,
+            "--candidate-dir", $candidateRoot,
+            "--arch", $env:INPUT_ARCHITECTURE,
+            "--epochs", $env:INPUT_EPOCHS,
+            "--batch-size", $env:INPUT_BATCH_SIZE,
+            "--device", "cuda"
+          )
+          if ($env:MLOPS_DATA_DIR) {
+            $arguments += @("--data-dir", $env:MLOPS_DATA_DIR)
+          }
+          if ($env:MLFLOW_TRACKING_URI) {
+            $arguments += @("--mlflow-tracking-uri", $env:MLFLOW_TRACKING_URI)
+          }
+          python @arguments
+
+      # Preserves rejected-candidate diagnostics; release workflow starts only when
+      # this job succeeds, so a failed Validation gate cannot be deployed.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: candidate-bundle
+          path: ${{ runner.temp }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: warn
+          retention-days: 30
