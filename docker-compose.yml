@@ -158,7 +158,7 @@ services:
     environment:
       TRITON_URL: "triton:8000"
       GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
-      GITHUB_REPO: "${GITHUB_REPO:-Dat-V/Medical-Image-Classification}"
+      GITHUB_REPO: "${GITHUB_REPO:-Darker2003/Medical-Image-Classification}"
     volumes:
       - ./data:/app/data
     ports:
@@ -166,14 +166,30 @@ services:
     networks: [mlops]
 
   # ------------------------------------------------------------------
-  # (Chừa sẵn cho extension)
-  #   mlflow : tracking server + registry                       (vai 2)
+  # GitHub Self-hosted Runner — Training Server (Docker, Linux)
+  # Lắng nghe GitHub Actions dispatch; thực thi pipeline training cục bộ.
+  # ACCESS_TOKEN = PAT với quyền "repo" → tự động register/deregister.
   # ------------------------------------------------------------------
+  github-runner:
+    image: myoung34/github-runner:latest
+    environment:
+      REPO_URL: "https://github.com/Darker2003/Medical-Image-Classification"
+      RUNNER_NAME: "local-docker-training-server"
+      ACCESS_TOKEN: "${GITHUB_TOKEN:-}"          # PAT với quyền repo
+      RUNNER_WORKDIR: "/tmp/github-runner"
+      LABELS: "self-hosted,Linux,X64"
+      EPHEMERAL: "false"                         # persistent runner (không tự xóa)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # cho phép spawn docker jobs
+      - runner_work:/tmp/github-runner
+    restart: unless-stopped
+    networks: [mlops]
 
 volumes:
   minio_data:
   grafana_data:
   loki_data:
+  runner_work:
 
 networks:
   mlops:

@@ -6,11 +6,8 @@
 #   - Manual dispatch with configurable parameters
 #   - Drift alert webhook (when monitoring detects drift)
 #
-# This workflow demonstrates the scheduled retraining lifecycle:
-#   1. Check drift status from production gateway
-#   2. Run full training pipeline
-#   3. Quality gate evaluation
-#   4. Deploy if quality gate passes
+# This workflow runs on a self-hosted Docker runner on the local machine.
+# Runner image: myoung34/github-runner (Ubuntu/Linux)
 # =============================================================================
 
 name: Scheduled Retrain
@@ -64,14 +61,14 @@ jobs:
       - name: Query drift endpoint
         id: drift
         run: |
-          DRIFT_URL="${{ secrets.GATEWAY_URL }}/drift"
+          DRIFT_URL="${{ secrets.GATEWAY_URL || 'http://gateway:8000' }}/drift"
           STATUS="unknown"
           SHOULD_RETRAIN="true"
 
           if curl -sf "$DRIFT_URL" -o drift.json 2>/dev/null; then
-            STATUS=$(jq -r '.status' drift.json)
+            STATUS=$(python3 -c "import json,sys; d=json.load(open('drift.json')); print(d.get('status','unknown'))" 2>/dev/null || echo "unknown")
             echo "Drift status: $STATUS"
-            cat drift.json | jq .
+            cat drift.json
 
             # Only skip if drift is stable AND this is a scheduled run
             if [[ "$STATUS" == "stable" && "${{ github.event_name }}" == "schedule" ]]; then
@@ -86,60 +83,80 @@ jobs:
           echo "drift_status=$STATUS" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------
-  # Step 2: Run training pipeline on trusted CUDA runner
+  # Step 2: Run training pipeline
   # -------------------------------------------------------------------
   retrain:
     name: Retrain model
     needs: check-drift
     if: needs.check-drift.outputs.should_retrain == 'true'
-    runs-on: [self-hosted, Windows, X64, mlops-train]
+    runs-on: self-hosted
     outputs:
       version: ${{ steps.train.outputs.version }}
       candidate_dir: ${{ steps.train.outputs.candidate_dir }}
       quality_gate: ${{ steps.train.outputs.quality_gate }}
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY || 'minioadmin' }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY || 'minioadmin' }}
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI || 'http://localhost:5000' }}
+      PYTHONIOENCODING: utf-8
+
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt
+
       - name: Determine next version
         id: version
-        shell: pwsh
         run: |
           # Find max existing candidate version
-          $candidates = Get-ChildItem -Path "artifacts/pipeline/candidate" -Directory -ErrorAction SilentlyContinue
-          $maxVersion = 0
-          foreach ($d in $candidates) {
-            if ($d.Name -match '^v(\d+)$') {
-              $v = [int]$Matches[1]
-              if ($v -gt $maxVersion) { $maxVersion = $v }
-            }
-          }
-          $nextVersion = $maxVersion + 1
-          echo "version=$nextVersion" >> $env:GITHUB_OUTPUT
-          echo "Next version: $nextVersion"
+          CANDIDATES_DIR="artifacts/pipeline/candidate"
+          MAX_VERSION=0
+          if [ -d "$CANDIDATES_DIR" ]; then
+            for d in "$CANDIDATES_DIR"/v*/; do
+              if [[ "$d" =~ v([0-9]+)/$ ]]; then
+                v="${BASH_REMATCH[1]}"
+                if [ "$v" -gt "$MAX_VERSION" ]; then MAX_VERSION=$v; fi
+              fi
+            done
+          fi
+          NEXT_VERSION=$((MAX_VERSION + 1))
+          echo "version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Next version: v$NEXT_VERSION"
 
       - name: Run training pipeline
         id: train
-        shell: pwsh
         env:
           ARCH: ${{ inputs.architecture || 'resnet18' }}
           EPOCHS: ${{ inputs.epochs || '10' }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          $env:PYTHONIOENCODING = "utf-8"
-          python -m training.pipeline `
-            --version $env:VERSION `
-            --arch $env:ARCH `
-            --epochs $env:EPOCHS `
-            --skip-ingest --skip-eda `
+          python -m training.pipeline \
+            --version "$VERSION" \
+            --arch "$ARCH" \
+            --epochs "$EPOCHS" \
+            --skip-ingest --skip-eda \
             --seed 42
 
-          $candidateDir = "artifacts/pipeline/candidate/v$env:VERSION"
-          echo "candidate_dir=$candidateDir" >> $env:GITHUB_OUTPUT
-          echo "version=$env:VERSION" >> $env:GITHUB_OUTPUT
+          CANDIDATE_DIR="artifacts/pipeline/candidate/v${VERSION}"
+          echo "candidate_dir=$CANDIDATE_DIR" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
           # Read quality gate result
-          $gate = Get-Content "$candidateDir/quality_gate.json" | ConvertFrom-Json
-          echo "quality_gate=$($gate.passed)" >> $env:GITHUB_OUTPUT
+          QUALITY_GATE=$(python3 -c "import json; d=json.load(open('${CANDIDATE_DIR}/quality_gate.json')); print(d['passed'])" 2>/dev/null || echo "False")
+          echo "quality_gate=$QUALITY_GATE" >> "$GITHUB_OUTPUT"
+          echo "Quality gate: $QUALITY_GATE"
 
       - name: Upload candidate bundle
         uses: actions/upload-artifact@v4
@@ -154,7 +171,7 @@ jobs:
     name: Deploy retrained model
     needs: retrain
     if: needs.retrain.outputs.quality_gate == 'True'
-    runs-on: [self-hosted, Windows, X64, mlops-deploy]
+    runs-on: self-hosted
     environment: model-production
     steps:
       - uses: actions/checkout@v4
@@ -165,17 +182,28 @@ jobs:
           name: candidate-v${{ needs.retrain.outputs.version }}
           path: candidate-bundle
 
-      - name: Deploy to production
-        shell: pwsh
-        env:
-          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
-          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
-          TRITON_HTTP_URL: ${{ secrets.TRITON_HTTP_URL }}
-          PYTHONIOENCODING: utf-8
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
         run: |
-          python -m training.deploy `
-            --bundle-dir candidate-bundle `
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt
+
+      - name: Deploy to production
+        env:
+          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT || 'http://minio:9000' }}
+          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY || 'minioadmin' }}
+          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY || 'minioadmin' }}
+          TRITON_HTTP_URL: ${{ secrets.TRITON_HTTP_URL || 'http://triton:8000' }}
+        run: |
+          python -m training.deploy \
+            --bundle-dir candidate-bundle \
             --timeout-seconds 120
 
   # -------------------------------------------------------------------

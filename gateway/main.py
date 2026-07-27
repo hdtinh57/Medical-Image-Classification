@@ -367,7 +367,7 @@ async def trigger_retrain() -> dict[str, Any]:
     Requires GITHUB_TOKEN and GITHUB_REPO environment variables.
     """
     token = os.environ.get("GITHUB_TOKEN")
-    repo = os.environ.get("GITHUB_REPO", "Dat-V/Medical-Image-Classification")
+    repo = os.environ.get("GITHUB_REPO", "Darker2003/Medical-Image-Classification")
 
     if not token:
         # Mock success for local demo if no token is provided
@@ -381,7 +381,7 @@ async def trigger_retrain() -> dict[str, Any]:
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github.v3+json",
     }
-    payload = {"ref": "main", "inputs": {"reason": "drift_detected"}}
+    payload = {"ref": "dev", "inputs": {"reason": "drift_detected"}}
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(url, headers=headers, json=payload, timeout=10.0)
