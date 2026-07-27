@@ -1,0 +1,201 @@
+# =============================================================================
+# Scheduled Model Retraining — DDM501 Continuous Training
+#
+# Triggers:
+#   - Weekly cron schedule (every Monday 03:00 UTC)
+#   - Manual dispatch with configurable parameters
+#   - Drift alert webhook (when monitoring detects drift)
+#
+# This workflow demonstrates the scheduled retraining lifecycle:
+#   1. Check drift status from production gateway
+#   2. Run full training pipeline
+#   3. Quality gate evaluation
+#   4. Deploy if quality gate passes
+# =============================================================================
+
+name: Scheduled Retrain
+
+on:
+  schedule:
+    # Weekly Monday 03:00 UTC — adjust based on data freshness needs
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for manual retrain trigger"
+        required: true
+        default: "scheduled"
+        type: choice
+        options:
+          - scheduled
+          - drift_detected
+          - performance_degradation
+          - new_data_available
+      architecture:
+        description: "Model architecture"
+        required: false
+        default: "resnet18"
+        type: choice
+        options:
+          - resnet18
+          - convnextv2_tiny.fcmae_ft_in22k_in1k
+      epochs:
+        description: "Training epochs"
+        required: false
+        default: "10"
+        type: string
+
+# Only one retrain at a time
+concurrency:
+  group: retrain
+  cancel-in-progress: false
+
+jobs:
+  # -------------------------------------------------------------------
+  # Step 1: Check if retraining is needed
+  # -------------------------------------------------------------------
+  check-drift:
+    name: Check production drift
+    runs-on: self-hosted
+    outputs:
+      should_retrain: ${{ steps.drift.outputs.should_retrain }}
+      drift_status: ${{ steps.drift.outputs.drift_status }}
+    steps:
+      - name: Query drift endpoint
+        id: drift
+        run: |
+          DRIFT_URL="${{ secrets.GATEWAY_URL }}/drift"
+          STATUS="unknown"
+          SHOULD_RETRAIN="true"
+
+          if curl -sf "$DRIFT_URL" -o drift.json 2>/dev/null; then
+            STATUS=$(jq -r '.status' drift.json)
+            echo "Drift status: $STATUS"
+            cat drift.json | jq .
+
+            # Only skip if drift is stable AND this is a scheduled run
+            if [[ "$STATUS" == "stable" && "${{ github.event_name }}" == "schedule" ]]; then
+              SHOULD_RETRAIN="false"
+              echo "No drift detected — skipping scheduled retrain."
+            fi
+          else
+            echo "Could not reach drift endpoint — proceeding with retrain."
+          fi
+
+          echo "should_retrain=$SHOULD_RETRAIN" >> "$GITHUB_OUTPUT"
+          echo "drift_status=$STATUS" >> "$GITHUB_OUTPUT"
+
+  # -------------------------------------------------------------------
+  # Step 2: Run training pipeline on trusted CUDA runner
+  # -------------------------------------------------------------------
+  retrain:
+    name: Retrain model
+    needs: check-drift
+    if: needs.check-drift.outputs.should_retrain == 'true'
+    runs-on: [self-hosted, Windows, X64, mlops-train]
+    outputs:
+      version: ${{ steps.train.outputs.version }}
+      candidate_dir: ${{ steps.train.outputs.candidate_dir }}
+      quality_gate: ${{ steps.train.outputs.quality_gate }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine next version
+        id: version
+        shell: pwsh
+        run: |
+          # Find max existing candidate version
+          $candidates = Get-ChildItem -Path "artifacts/pipeline/candidate" -Directory -ErrorAction SilentlyContinue
+          $maxVersion = 0
+          foreach ($d in $candidates) {
+            if ($d.Name -match '^v(\d+)$') {
+              $v = [int]$Matches[1]
+              if ($v -gt $maxVersion) { $maxVersion = $v }
+            }
+          }
+          $nextVersion = $maxVersion + 1
+          echo "version=$nextVersion" >> $env:GITHUB_OUTPUT
+          echo "Next version: $nextVersion"
+
+      - name: Run training pipeline
+        id: train
+        shell: pwsh
+        env:
+          ARCH: ${{ inputs.architecture || 'resnet18' }}
+          EPOCHS: ${{ inputs.epochs || '10' }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $env:PYTHONIOENCODING = "utf-8"
+          python -m training.pipeline `
+            --version $env:VERSION `
+            --arch $env:ARCH `
+            --epochs $env:EPOCHS `
+            --skip-ingest --skip-eda `
+            --seed 42
+
+          $candidateDir = "artifacts/pipeline/candidate/v$env:VERSION"
+          echo "candidate_dir=$candidateDir" >> $env:GITHUB_OUTPUT
+          echo "version=$env:VERSION" >> $env:GITHUB_OUTPUT
+
+          # Read quality gate result
+          $gate = Get-Content "$candidateDir/quality_gate.json" | ConvertFrom-Json
+          echo "quality_gate=$($gate.passed)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload candidate bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-v${{ steps.version.outputs.version }}
+          path: ${{ steps.train.outputs.candidate_dir }}
+
+  # -------------------------------------------------------------------
+  # Step 3: Deploy if quality gate passed
+  # -------------------------------------------------------------------
+  deploy:
+    name: Deploy retrained model
+    needs: retrain
+    if: needs.retrain.outputs.quality_gate == 'True'
+    runs-on: [self-hosted, Windows, X64, mlops-deploy]
+    environment: model-production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download candidate bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-v${{ needs.retrain.outputs.version }}
+          path: candidate-bundle
+
+      - name: Deploy to production
+        shell: pwsh
+        env:
+          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
+          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          TRITON_HTTP_URL: ${{ secrets.TRITON_HTTP_URL }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          python -m training.deploy `
+            --bundle-dir candidate-bundle `
+            --timeout-seconds 120
+
+  # -------------------------------------------------------------------
+  # Step 4: Notify result
+  # -------------------------------------------------------------------
+  notify:
+    name: Report result
+    needs: [check-drift, retrain, deploy]
+    if: always()
+    runs-on: self-hosted
+    steps:
+      - name: Summary
+        run: |
+          echo "## Scheduled Retrain Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Drift status | ${{ needs.check-drift.outputs.drift_status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Retrain needed | ${{ needs.check-drift.outputs.should_retrain }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Quality gate | ${{ needs.retrain.outputs.quality_gate || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | ${{ needs.retrain.outputs.version || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy | ${{ needs.deploy.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY

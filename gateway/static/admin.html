@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard | Premium UI</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://unpkg.com/feather-icons"></script>
+</head>
+<body>
+    <!-- Background Orbs -->
+    <div class="bg-orbs">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2" style="background: radial-gradient(circle, rgba(239,68,68,0.15) 0%, rgba(239,68,68,0) 70%);"></div>
+        <div class="orb orb-3" style="background: radial-gradient(circle, rgba(245,158,11,0.1) 0%, rgba(245,158,11,0) 70%);"></div>
+    </div>
+
+    <div class="container">
+        <header class="header">
+            <h1>MLOps Command Center</h1>
+            <p>Production lifecycle management simplified.</p>
+        </header>
+
+        <nav class="nav-tabs">
+            <a href="index.html" class="nav-link"><i data-feather="crosshair"></i> Prediction</a>
+            <a href="admin.html" class="nav-link active"><i data-feather="sliders"></i> Admin Dashboard</a>
+        </nav>
+
+        <main>
+            <div class="admin-grid">
+                
+                <!-- Left: Feedback Review -->
+                <div class="admin-card" style="grid-row: span 2;">
+                    <div class="admin-card-title">
+                        <i data-feather="message-square"></i> Clinical Feedback
+                    </div>
+                    <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 1.5rem;">Review the top confusion pairs submitted by expert clinicians to target for next retraining.</p>
+                    
+                    <!-- Stats overlay -->
+                    <div style="display: flex; gap: 1rem; margin-bottom: 1.5rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border-color);">
+                        <div style="flex: 1;">
+                            <div style="font-size: 0.85rem; color: var(--text-secondary); text-transform: uppercase;">Production Acc</div>
+                            <div style="font-size: 2rem; font-weight: 800; color: white;" id="stat-accuracy">--%</div>
+                        </div>
+                        <div style="flex: 1;">
+                            <div style="font-size: 0.85rem; color: var(--text-secondary); text-transform: uppercase;">Total Samples</div>
+                            <div style="font-size: 2rem; font-weight: 800; color: white;" id="stat-feedback-count">0</div>
+                        </div>
+                    </div>
+
+                    <div style="font-size: 0.9rem; font-weight: 600; margin-bottom: 1rem; color: var(--text-secondary); text-transform: uppercase;">Top Confusion Pairs</div>
+                    <div class="feedback-list" id="confusion-pairs">
+                        <!-- Loaded by JS -->
+                        <div style="color: var(--text-secondary); text-align: center; padding: 2rem 0;">Loading...</div>
+                    </div>
+                </div>
+
+                <!-- Right Top: Data Ingestion -->
+                <div class="admin-card">
+                    <div class="admin-card-title">
+                        <i data-feather="database"></i> Ingest New Data
+                    </div>
+                    <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 1.5rem;">Upload validated ground-truth datasets (.zip) to expand the model's knowledge base.</p>
+                    
+                    <div class="upload-area" id="data-drop-zone" style="padding: 2rem 1.5rem;">
+                        <i data-feather="archive" style="width: 48px; height: 48px; color: var(--primary-color); margin-bottom: 1rem;"></i>
+                        <h4 style="font-weight: 600;">Select ZIP Archive</h4>
+                        <input type="file" id="data-file-input" class="file-input" accept=".zip">
+                    </div>
+                    
+                    <div id="upload-status" class="hidden" style="margin-top: 1rem; font-size: 0.95rem; font-weight: 500; display: flex; align-items: center; justify-content: center; gap: 0.5rem;"></div>
+                </div>
+
+                <!-- Right Bottom: Retrain Trigger -->
+                <div class="admin-card hero-btn-container" style="background: rgba(17, 24, 39, 0.6); border: 1px solid rgba(239, 68, 68, 0.2);">
+                    <div class="admin-card-title" style="margin-bottom: 0.5rem;">
+                        <i data-feather="zap" style="color: #ef4444;"></i> Continuous Training
+                    </div>
+                    <p style="color: var(--text-secondary); font-size: 0.95rem; margin-bottom: 2rem;">Trigger the automated GitHub Actions pipeline. Model will deploy if it passes quality gates.</p>
+                    
+                    <button class="btn btn-hero" id="btn-retrain" style="width: 100%;">
+                        <i data-feather="play"></i> Launch Retraining
+                    </button>
+                    
+                    <div id="retrain-status" class="hidden" style="margin-top: 1.5rem; font-size: 0.95rem; font-weight: 500;"></div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <script src="js/admin.js"></script>
+    <script>
+        feather.replace();
+    </script>
+</body>
+</html>

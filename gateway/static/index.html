@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Skin Cancer Classification | Premium UI</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://unpkg.com/feather-icons"></script>
+</head>
+<body>
+    <!-- Background Orbs -->
+    <div class="bg-orbs">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+        <div class="orb orb-3"></div>
+    </div>
+
+    <div class="container">
+        <header class="header">
+            <h1>Skin Lesion Analysis</h1>
+            <p>High-precision 9-class clinical support prototype powered by NVIDIA Triton Inference Server.</p>
+        </header>
+
+        <nav class="nav-tabs">
+            <a href="index.html" class="nav-link active"><i data-feather="crosshair"></i> Prediction</a>
+            <a href="admin.html" class="nav-link"><i data-feather="sliders"></i> Admin Dashboard</a>
+        </nav>
+
+        <main>
+            <div class="glass-panel">
+                <div class="prediction-split">
+                    
+                    <!-- Left: Upload & Image -->
+                    <div class="split-left">
+                        <div class="upload-area" id="drop-zone">
+                            <div class="upload-icon">
+                                <i data-feather="upload-cloud" style="width: 32px; height: 32px;"></i>
+                            </div>
+                            <h3>Upload Lesion Image</h3>
+                            <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 0.5rem;">Drag & drop or click to browse.<br>Supports JPEG, PNG, TIFF (Max 10MB)</p>
+                            <input type="file" id="file-input" class="file-input" accept="image/*">
+                        </div>
+
+                        <div id="loading" class="spinner-container hidden">
+                            <div class="spinner"></div>
+                            <p style="margin-top: 1rem; color: var(--text-secondary); font-weight: 500;">Analyzing image...</p>
+                        </div>
+
+                        <div class="preview-box hidden" id="preview-container">
+                            <img id="image-preview-src" src="" alt="Uploaded lesion">
+                        </div>
+                    </div>
+                    
+                    <!-- Right: Results & Feedback -->
+                    <div class="split-right">
+                        <div class="result-panel hidden" id="result-panel">
+                            
+                            <div class="result-badge">
+                                <i data-feather="zap" style="width: 14px; height: 14px;"></i> 
+                                Inference Latency: <span id="latency-text">0</span>s
+                            </div>
+
+                            <div style="color: var(--text-secondary); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.85rem;">Predicted Class</div>
+                            <div class="prediction-highlight" id="predicted-class">-</div>
+                            
+                            <div class="confidence-wrap">
+                                <div class="confidence-header">
+                                    <span>Model Confidence</span>
+                                    <span id="confidence-text" style="color: var(--primary-color);">0%</span>
+                                </div>
+                                <div class="confidence-meter">
+                                    <div class="confidence-fill" id="confidence-fill"></div>
+                                </div>
+                            </div>
+
+                            <div class="probs-title">Probability Distribution (Top 5)</div>
+                            <div id="probs-chart" style="margin-bottom: 2rem;">
+                                <!-- Inserted by JS -->
+                            </div>
+
+                            <!-- Feedback Section -->
+                            <div style="border-top: 1px solid var(--border-color); padding-top: 2rem;" id="feedback-section">
+                                <h3 style="margin-bottom: 1rem; font-size: 1.1rem;">Expert Validation</h3>
+                                <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 1.25rem;">Does the prediction match your clinical assessment?</p>
+                                
+                                <div style="display: flex; gap: 1rem;" id="feedback-buttons">
+                                    <button class="btn btn-success" id="btn-correct" style="flex: 1;">
+                                        <i data-feather="check-circle"></i> Yes, Correct
+                                    </button>
+                                    <button class="btn btn-danger" id="btn-incorrect" style="flex: 1;">
+                                        <i data-feather="x-circle"></i> No, Incorrect
+                                    </button>
+                                </div>
+                                
+                                <div id="correction-form" class="hidden" style="animation: fadeUp 0.3s ease-out;">
+                                    <label style="display: block; margin-bottom: 0.75rem; font-size: 0.95rem; font-weight: 500;">Please select the actual diagnosis:</label>
+                                    <select id="actual-class-select" class="form-select" style="margin-bottom: 1rem;">
+                                        <!-- Options populated by JS -->
+                                    </select>
+                                    <button class="btn btn-primary" id="btn-submit-correction" style="width: 100%;">
+                                        Submit Correction
+                                    </button>
+                                </div>
+
+                                <div id="feedback-success" class="hidden" style="color: var(--success-color); padding: 1rem; background: rgba(16, 185, 129, 0.1); border-radius: 12px; margin-top: 1rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem; border: 1px solid rgba(16, 185, 129, 0.2);">
+                                    <i data-feather="check"></i> Feedback recorded successfully.
+                                </div>
+                            </div>
+
+                        </div>
+                        
+                        <!-- Empty State -->
+                        <div id="empty-state" style="height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--text-secondary); opacity: 0.5;">
+                            <i data-feather="image" style="width: 64px; height: 64px; margin-bottom: 1rem;"></i>
+                            <p>Upload an image to view<br>prediction results and analysis.</p>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="js/app.js"></script>
+    <script>
+        feather.replace();
+    </script>
+</body>
+</html>
