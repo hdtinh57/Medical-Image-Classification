@@ -12,3 +12,4 @@ python-multipart>=0.0.18,<1.0
 httpx>=0.25.0
 aiofiles>=23.2.1
 prometheus-client>=0.21,<1.0
+tritonclient[http]>=2.41,<3.0
