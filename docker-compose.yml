@@ -180,8 +180,15 @@ services:
       LABELS: "self-hosted,Linux,X64"
       EPHEMERAL: "false"                         # persistent runner (không tự xóa)
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock  # cho phép spawn docker jobs
+      - /var/run/docker.sock:/var/run/docker.sock
       - runner_work:/tmp/github-runner
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     restart: unless-stopped
     networks: [mlops]
 
