@@ -13,3 +13,4 @@ httpx>=0.25.0
 aiofiles>=23.2.1
 prometheus-client>=0.21,<1.0
 tritonclient[http]>=2.41,<3.0
+pytest-asyncio>=0.23,<1.0
