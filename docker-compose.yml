@@ -156,13 +156,17 @@ services:
       triton:
         condition: service_started
     environment:
-      TRITON_URL: triton:8000   # cùng network 'mlops'
+      TRITON_URL: "triton:8000"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      GITHUB_REPO: "${GITHUB_REPO:-Dat-V/Medical-Image-Classification}"
+    volumes:
+      - ./data:/app/data
     ports:
-      - "8080:8000"             # host 8080 (8000 đã dành cho Triton REST)
+      - "8080:8000"   # http://localhost:8080 (tránh xung đột Triton REST 8000)
     networks: [mlops]
 
   # ------------------------------------------------------------------
-  # (Team khác thêm sau — chừa sẵn chỗ)
+  # (Chừa sẵn cho extension)
   #   mlflow : tracking server + registry                       (vai 2)
   # ------------------------------------------------------------------
 

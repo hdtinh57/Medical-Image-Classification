@@ -10,8 +10,9 @@ WORKDIR /app
 COPY gateway/requirements.txt ./gateway/requirements.txt
 RUN pip install --no-cache-dir -r gateway/requirements.txt
 
-# Copy source gateway (giữ dạng package: import gateway.main).
+# Copy source gateway and monitoring.
 COPY gateway/ ./gateway/
+COPY monitoring/ ./monitoring/
 
 EXPOSE 8000
 

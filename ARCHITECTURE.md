@@ -139,11 +139,34 @@ production version. The checkpoint and failed deployment record remain for diagn
 | Model contract | self-describing checkpoint, ONNX parity and Triton `(batch, 9)` shape checks |
 | Observability | Prometheus scrapes Triton metrics; Grafana/alert rules expose availability, errors and latency |
 
+## Technology decisions
+
+| Component | Choice | Rationale | Alternatives considered |
+|---|---|---|---|
+| **Training framework** | PyTorch + timm | Rich pretrained model zoo; native AMP; strong research community | TensorFlow/Keras — less flexible for custom training loops |
+| **Experiment tracking** | MLflow | Open-source, language-agnostic, supports local SQLite and remote tracking | Weights & Biases — SaaS dependency; Neptune — cost |
+| **Model serving** | Triton Inference Server (ONNX Runtime) | Production-grade batching, versioning, multi-model, Prometheus metrics built-in | TorchServe — less mature versioning; FastAPI direct — no batching/optimization |
+| **Model export** | ONNX (opset 18) | Framework-agnostic; Triton native backend; numerical parity verification | TorchScript — Triton support less mature; SavedModel — TF only |
+| **Object storage** | MinIO (S3-compatible) | Self-hosted, immutable versioning, no cloud vendor lock-in | AWS S3 — cost/dependency; local filesystem — no versioning |
+| **API gateway** | FastAPI | Auto Swagger/OpenAPI; async support; lightweight (no torch dependency) | Flask — no auto docs; Django — too heavy for API-only |
+| **Monitoring** | Prometheus + Grafana | Industry standard; Triton native metrics export; alerting support | Datadog — SaaS cost; ELK — heavier stack |
+| **CI/CD** | GitHub Actions | Native to repository; matrix strategy; Environment protection rules | Jenkins — self-hosted complexity; GitLab CI — platform migration |
+| **Containerization** | Docker Compose | Multi-service orchestration; development simplicity | Kubernetes — overkill for prototype scope |
+
+Key trade-offs:
+
+- **Triton vs direct PyTorch serving**: Triton adds deployment complexity but provides
+  production-grade dynamic batching, model versioning, and built-in Prometheus metrics
+  that would require significant custom code otherwise.
+- **MinIO vs cloud S3**: MinIO enables fully local development and avoids cloud costs,
+  but requires self-managed infrastructure in production.
+- **Gateway without torch**: The gateway image stays small (~200 MB vs ~2 GB) by using
+  Pillow + NumPy for preprocessing and delegating inference to Triton.
+
 ## Explicit non-goals and remaining work
 
-- The FastAPI image-upload gateway, Grad-CAM and fairness reports remain separate, unfinished
-  features. Current Triton API accepts preprocessed tensors, not image files.
 - MinIO/Grafana Compose credentials are development defaults and must be replaced before public or
   production use.
 - The pipeline validates deployment readiness but does not yet implement automatic traffic splitting,
   model drift detection, load testing, TLS, OIDC, or infrastructure-as-code.
+
