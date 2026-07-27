@@ -8,11 +8,12 @@ select = ["E", "F", "I", "W"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-# -p no:anyio: plugin anyio crash lúc collect trên runtime Windows; suite này
-# không có async test nào cần nó.
-# The installed anyio plugin crashes during collection on this Windows runtime;
-# this suite has no async tests that require it.
-addopts = "-q --strict-markers -p no:anyio -p no:anyio"
+# asyncio_mode=auto: pytest-asyncio handles all async tests automatically
+# without requiring @pytest.mark.asyncio on every test.
+# -p no:anyio: anyio plugin crashes during collection on Windows.
+asyncio_mode = "auto"
+addopts = "-q --strict-markers -p no:anyio"
 markers = [
     "integration: cần Docker/MinIO/Triton đang chạy (không chạy trong job test nhẹ)",
+    "asyncio: mark a test as async (handled by pytest-asyncio)",
 ]
