@@ -355,6 +355,50 @@ async def drift() -> dict[str, Any]:
 # ── Admin ──────────────────────────────────────────────────────────────────
 
 
+@app.get(
+    "/admin/pipeline-status",
+    summary="Get latest retraining pipeline status",
+    tags=["Admin"],
+    response_model=dict[str, Any],
+)
+async def pipeline_status() -> dict[str, Any]:
+    """Query the latest GitHub Actions run status for the retrain workflow."""
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPO", "Darker2003/Medical-Image-Classification")
+
+    if not token:
+        return {"status": "unknown", "message": "GITHUB_TOKEN not configured."}
+
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/scheduled-retrain.yml/runs?per_page=1"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=headers, timeout=10.0)
+
+    if resp.status_code != 200:
+        return {"status": "error", "message": f"GitHub API error: {resp.status_code}"}
+
+    runs = resp.json().get("workflow_runs", [])
+    if not runs:
+        return {"status": "none", "message": "No runs found."}
+
+    run = runs[0]
+    return {
+        "status": run["status"],  # queued | in_progress | completed
+        "conclusion": run["conclusion"],  # success | failure | cancelled | None
+        "run_id": run["id"],
+        "run_number": run["run_number"],
+        "triggered_by": run["event"],
+        "branch": run["head_branch"],
+        "started_at": run["run_started_at"],
+        "updated_at": run["updated_at"],
+        "url": run["html_url"],
+    }
+
+
 @app.post(
     "/admin/retrain",
     summary="Trigger model retraining pipeline",
