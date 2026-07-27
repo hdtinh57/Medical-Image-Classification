@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
         feather.replace();
 
         statusDiv.classList.remove('hidden');
+        statusDiv.style.display = 'flex';
         statusDiv.style.color = 'var(--text-secondary)';
         statusDiv.textContent = 'Triggering workflow...';
 
