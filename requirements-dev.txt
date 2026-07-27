@@ -3,3 +3,12 @@
 -r requirements.txt
 
 pytest-cov>=6.0,<7.0
+
+# Gateway dependencies needed by test_api.py and test_monitoring.py in CI
+# (gateway/requirements.txt is only installed inside the Docker container)
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.34,<1.0
+python-multipart>=0.0.18,<1.0
+httpx>=0.25.0
+aiofiles>=23.2.1
+prometheus-client>=0.21,<1.0
